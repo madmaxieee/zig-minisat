@@ -1,24 +1,70 @@
 const std = @import("std");
+const clap = @import("clap");
+
+const debug = std.debug;
+const io = std.io;
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_impl.deinit();
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    const gpa = gpa_impl.allocator();
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+    const paramsConfig =
+        \\-h, --help             Display this help and exit.
+        \\<FILE>                 a plain text DIMCAS file.
+        \\
+    ;
 
-    try bw.flush(); // don't forget to flush!
-}
+    const params = comptime clap.parseParamsComptime(paramsConfig);
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+    const parsers = comptime .{
+        .FILE = clap.parsers.string,
+    };
+
+    const stderr = io.getStdErr();
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, parsers, .{
+        .diagnostic = &diag,
+        .allocator = gpa,
+    }) catch |err| {
+        diag.report(stderr.writer(), err) catch {};
+        return;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        return clap.help(stderr.writer(), clap.Help, &params, .{});
+    }
+
+    if (res.positionals.len > 1) {
+        try stderr.writer().print("error: too many arguments, expected 1, got {d}\n", .{res.positionals.len});
+        return;
+    }
+
+    var reader: std.fs.File.Reader = undefined;
+    // read from stdin if no file is provided
+    if (res.positionals.len == 0) {
+        reader = io.getStdIn().reader();
+    } else if (res.positionals.len == 1) {
+        const file_name = res.positionals[0];
+        const file = std.fs.cwd().openFile(file_name, .{}) catch |err| {
+            try stderr.writer().print("error: failed to open file '{s}': {}\n", .{ file_name, err });
+            return;
+        };
+        reader = file.reader();
+    } else {
+        unreachable;
+    }
+
+    // read the file and print it to stdout
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const read = try reader.read(buf[0..]);
+        if (read == 0) {
+            break;
+        }
+        _ = try io.getStdOut().write(buf[0..read]);
+    }
 }
