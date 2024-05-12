@@ -40,8 +40,13 @@ const VarOrderHeapContext = struct {
 };
 
 fn compareVariables(context: VarOrderHeapContext, a: Var, b: Var) std.math.Order {
-    _ = context;
-    return std.math.order(a, b);
+    return if (context.activity.get(a).? > context.activity.get(b).?) {
+        return std.math.Order.gt;
+    } else if (context.activity.get(a).? < context.activity.get(b).?) {
+        return std.math.Order.lt;
+    } else {
+        return std.math.Order.eq;
+    };
 }
 
 const VarOrderHeap = std.PriorityQueue(
@@ -95,7 +100,6 @@ pub const MiniSAT = struct {
     phase_saving: enum { none, limited, full },
     rnd_pol: bool,
     rnd_init_act: bool,
-    garbage_frac: f64,
     min_learnts_lim: u32,
 
     restart_first: i32,
@@ -120,8 +124,8 @@ pub const MiniSAT = struct {
     max_literals: u64,
     tot_literals: u64,
 
-    clauses: std.ArrayList(Clause),
-    learnts: std.ArrayList(Clause),
+    clauses: std.ArrayList(*Clause),
+    learnts: std.ArrayList(*Clause),
     trail: std.ArrayList(Lit),
     trail_lim: std.ArrayList(i32),
     assumptions: std.ArrayList(Lbool),
@@ -161,8 +165,8 @@ pub const MiniSAT = struct {
     learntsize_adjust_cnt: i32,
 
     // resource constraints
-    conflict_budget: ?i64,
-    propagation_budget: ?i64,
+    conflict_budget: ?u64,
+    propagation_budget: ?u64,
     asynch_interrupt: bool,
 
     rand: std.Random,
@@ -190,7 +194,6 @@ pub const MiniSAT = struct {
             .phase_saving = .full,
             .rnd_pol = false,
             .rnd_init_act = false,
-            .garbage_frac = 0.20,
             .min_learnts_lim = 0,
 
             .restart_first = 100,
@@ -215,8 +218,8 @@ pub const MiniSAT = struct {
             .max_literals = 0,
             .tot_literals = 0,
 
-            .clauses = std.ArrayList(Clause).init(allocator),
-            .learnts = std.ArrayList(Clause).init(allocator),
+            .clauses = std.ArrayList(*Clause).init(allocator),
+            .learnts = std.ArrayList(*Clause).init(allocator),
             .trail = std.ArrayList(Lit).init(allocator),
             .trail_lim = std.ArrayList(i32).init(allocator),
             .assumptions = std.ArrayList(Lbool).init(allocator),
@@ -312,6 +315,7 @@ pub const MiniSAT = struct {
 
         self.add_tmp.ensureTotalCapacity(ps.len) catch false;
         std.mem.copyForwards(Lit, self.add_tmp.items, ps);
+        self.add_tmp.shrinkRetainingCapacity(ps.len);
         std.mem.sort(
             Lit,
             self.add_tmp.items,
@@ -346,41 +350,6 @@ pub const MiniSAT = struct {
         return true;
     }
 
-    inline fn setDecisionVar(self: *MiniSAT, v: Var, b: bool) void {
-        if (b and !(self.decision.get(v) orelse false)) {
-            self.dec_vars += 1;
-        } else if (!b and (self.decision.get(v) orelse false)) {
-            self.dec_vars -= 1;
-        }
-        self.decision.put(v, b) catch unreachable;
-    }
-
-    inline fn insertVarOrder(self: MiniSAT, v: Var) void {
-        const in_heap = blk: {
-            for (self.order_heap) |x| {
-                if (x == v) {
-                    break :blk true;
-                }
-            }
-            break :blk false;
-        };
-        if (!in_heap and self.decision.get(v)) {
-            self.order_heap.insert(v);
-        }
-    }
-
-    inline fn litValue(self: MiniSAT, l: Lit) Lbool {
-        return self.assigns.get(l.variable()).? ^ @as(i32, l.sign());
-    }
-
-    inline fn varValue(self: MiniSAT, x: Var) Lbool {
-        return self.assigns.get(x).?;
-    }
-
-    inline fn decisionLevel(self: MiniSAT) usize {
-        return self.trail_lim.items.len;
-    }
-
     fn uncheckedEnqueue(self: *MiniSAT, p: Lit, from: ?*Clause) void {
         if (self.litValue(p) != types.l_Undef) {
             unreachable;
@@ -403,5 +372,161 @@ pub const MiniSAT = struct {
         // TODO:
         _ = self;
         unreachable;
+    }
+
+    inline fn reason(self: MiniSAT, x: Var) ?*Clause {
+        return self.vardata.get(x).?.reason;
+    }
+
+    inline fn level(self: MiniSAT, x: Var) usize {
+        return self.vardata.get(x).?.level;
+    }
+
+    fn insertVarOrder(self: MiniSAT, v: Var) void {
+        if (!self.inOrderHeap(v) and self.decision.get(v)) {
+            self.order_heap.insert(v);
+        }
+    }
+
+    fn inOrderHeap(self: MiniSAT, v: Var) bool {
+        for (self.order_heap) |x| {
+            if (x == v) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline fn varDecayActivity(self: *MiniSAT) void {
+        self.var_inc *= 1 / self.var_decay;
+    }
+
+    fn varBumpActivity(self: *MiniSAT, v: Var) void {
+        const act: *f64 = self.activity.getPtr(v).?;
+        act.* += self.var_inc;
+        if (act.* > 1e100) {
+            for (0..self.newVar()) |i| {
+                self.activity.put(@intCast(i), act.* * 1e-100) catch unreachable;
+            }
+            self.var_inc *= 1e-100;
+        }
+        if (self.inOrderHeap(v)) {
+            self.order_heap.update(v, v);
+        }
+    }
+
+    inline fn claDecayActivity(self: *MiniSAT) void {
+        self.cla_inc *= 1 / self.clause_decay;
+    }
+
+    fn claBumpActivity(self: *MiniSAT, c: *Clause) void {
+        const act: *f32 = c.activityPtr().?;
+        act.* += self.cla_inc;
+        if (c.activity > 1e20) {
+            for (0..self.learnts.len) |i| {
+                const act_i: *f32 = self.learnts.items[i].activityPtr().?;
+                act_i.* *= 1e-20;
+            }
+            self.cla_inc *= 1e-20;
+        }
+    }
+
+    inline fn enqueue(self: *MiniSAT, p: Lit, from: *Clause) bool {
+        const p_val = self.litValue(p);
+        if (p_val != types.l_Undef) {
+            return p_val != types.l_False;
+        } else {
+            self.uncheckedEnqueue(p, from);
+            return true;
+        }
+    }
+
+    inline fn locked(self: MiniSAT, c: *Clause) bool {
+        const var_0 = c.get(0).variable();
+        const val_0 = self.litValue(var_0);
+        return val_0 == types.l_True and self.reason(var_0) == c;
+    }
+
+    inline fn newDecisionLevel(self: *MiniSAT) void {
+        self.trail_lim.append(self.trail.len);
+    }
+
+    inline fn decisionLevel(self: MiniSAT) usize {
+        return self.trail_lim.items.len;
+    }
+
+    inline fn abstractLevel(self: MiniSAT, x: Var) u32 {
+        return 1 << (self.level(x) & 31);
+    }
+
+    inline fn litValue(self: MiniSAT, l: Lit) Lbool {
+        return self.assigns.get(l.variable()).? ^ @as(i32, l.sign());
+    }
+
+    inline fn varValue(self: MiniSAT, x: Var) Lbool {
+        return self.assigns.get(x).?;
+    }
+
+    inline fn modelLitValue(self: MiniSAT, l: Lit) Lbool {
+        return self.model.items[@intCast(l.variable())].xor(l.sign());
+    }
+
+    inline fn modelVarValue(self: MiniSAT, x: Var) Lbool {
+        return self.model.items[@intCast(x)];
+    }
+
+    inline fn nAssigns(self: MiniSAT) usize {
+        return self.trail.len;
+    }
+
+    inline fn nVars(self: MiniSAT) usize {
+        return self.next_var;
+    }
+
+    inline fn nFreeVars(self: MiniSAT) usize {
+        return self.dec_vars - (if (self.trail_lim.len == 0)
+            self.trail.len
+        else
+            self.trail_lim.items[0]);
+    }
+
+    inline fn setPolarity(self: *MiniSAT, v: Var, b: Lbool) void {
+        self.user_pol.put(v, b) catch unreachable;
+    }
+
+    inline fn setDecisionVar(self: *MiniSAT, v: Var, b: bool) void {
+        if (b and !(self.decision.get(v) orelse false)) {
+            self.dec_vars += 1;
+        } else if (!b and (self.decision.get(v) orelse false)) {
+            self.dec_vars -= 1;
+        }
+        self.decision.put(v, b) catch unreachable;
+    }
+
+    inline fn setConfBudget(self: *MiniSAT, x: i64) void {
+        self.conflict_budget = self.conflicts + x;
+    }
+
+    inline fn setPropBudget(self: *MiniSAT, x: i64) void {
+        self.propagation_budget = self.propagations + x;
+    }
+
+    inline fn interrupt(self: *MiniSAT) void {
+        self.asynch_interrupt = true;
+    }
+
+    inline fn clearInterrupt(self: *MiniSAT) void {
+        self.asynch_interrupt = false;
+    }
+
+    inline fn budgetOff(self: *MiniSAT) void {
+        self.conflict_budget = null;
+        self.propagation_budget = null;
+    }
+
+    inline fn withinBudget(self: *MiniSAT) bool {
+        return (self.conflict_budget == null or self.conflicts < self.conflict_budget.?) and
+            (self.propagation_budget == null or self.propagations < self.propagation_budget.?) and
+            !self.asynch_interrupt;
     }
 };

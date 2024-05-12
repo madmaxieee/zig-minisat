@@ -182,6 +182,13 @@ pub const Clause = struct {
         return self.data[self.header.size].act;
     }
 
+    pub inline fn activityPtr(self: *Clause) ClauseError!*f32 {
+        if (!self.header.has_extra) {
+            return ClauseError.NoExtraData;
+        }
+        return &self.data[self.header.size].act;
+    }
+
     pub inline fn abstraction(self: *Clause, i: usize) ClauseError!u32 {
         if (!self.header.has_extra) {
             return ClauseError.NoExtraData;
