@@ -3,6 +3,11 @@ const clap = @import("clap");
 
 const debug = std.debug;
 const io = std.io;
+const fs = std.fs;
+
+const MiniSAT = @import("solver.zig").MiniSAT;
+const Solver = @import("solver.zig").Solver;
+const IntMap = @import("int_map.zig").IntMap;
 
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
@@ -43,13 +48,13 @@ pub fn main() !void {
         return;
     }
 
-    var reader: std.fs.File.Reader = undefined;
+    var reader: fs.File.Reader = undefined;
     // read from stdin if no file is provided
     if (res.positionals.len == 0) {
         reader = io.getStdIn().reader();
     } else if (res.positionals.len == 1) {
         const file_name = res.positionals[0];
-        const file = std.fs.cwd().openFile(file_name, .{}) catch |err| {
+        const file = fs.cwd().openFile(file_name, .{}) catch |err| {
             try stderr.writer().print("error: failed to open file '{s}': {}\n", .{ file_name, err });
             return;
         };
@@ -67,4 +72,13 @@ pub fn main() !void {
         }
         _ = try io.getStdOut().write(buf[0..read]);
     }
+
+    var minisat = try MiniSAT.create(gpa);
+    var solver: Solver = minisat.solver();
+    _ = solver.newVar(.{ .value = 1 }, true);
+    _ = IntMap(u64, u32).init(gpa);
+}
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
 }

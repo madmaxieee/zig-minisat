@@ -31,6 +31,26 @@ pub const Literal = struct {
     }
 };
 
+pub fn literalLessThan(context: anytype, lhs: Literal, rhs: Literal) bool {
+    _ = context;
+    return lhs.lt(rhs);
+}
+
+pub const LiteralHashContext = struct {
+    pub fn hash(self: LiteralHashContext, lit: Literal) u32 {
+        _ = self;
+        return @intCast(lit.x);
+    }
+    pub fn eql(self: LiteralHashContext, a: Literal, b: Literal, index: usize) bool {
+        _ = self;
+        _ = index;
+        return a.eql(b);
+    }
+};
+
+pub const lit_Undef = Literal{ .x = -2 };
+pub const lit_Error = Literal{ .x = -1 };
+
 test "Literal" {
     const testing = std.testing;
     const var_: Variable = 3;
@@ -44,6 +64,9 @@ test "Literal" {
 pub const LiftedBool = struct {
     value: u8,
 
+    pub inline fn fromBool(v: bool) LiftedBool {
+        return LiftedBool{ .value = @intFromBool(v) };
+    }
     pub inline fn eql(self: LiftedBool, b: LiftedBool) bool {
         return ((b.value & 2) & (self.value & 2)) | (!(b.value & 2) & (self.value == b.value));
     }
@@ -61,6 +84,10 @@ pub const LiftedBool = struct {
         return .{ .value = v };
     }
 };
+
+pub const l_True = LiftedBool{ .value = 0 };
+pub const l_False = LiftedBool{ .value = 1 };
+pub const l_Undef = LiftedBool{ .value = 2 };
 
 const ClauseHeader = struct {
     mark: u32,
@@ -174,14 +201,14 @@ pub const Clause = struct {
             return .none;
         }
 
-        var to_remove: Literal = undefined;
+        var to_remove: ?Literal = null;
         const c: *Literal = self.data;
         const d: *Literal = other.data;
         outer: for (0..self.header.size) |i| {
             for (0..other.header.size) |j| {
                 if (c[i].lit.eql(d[j].lit)) {
                     continue :outer;
-                } else if (to_remove == undefined and c[i].lit.eql(d[j].lit.neg())) {
+                } else if (to_remove == null and c[i].lit.eql(d[j].lit.neg())) {
                     to_remove = c[i].lit;
                     continue :outer;
                 }
@@ -190,11 +217,11 @@ pub const Clause = struct {
             return .none;
         }
 
-        if (to_remove == undefined) {
+        if (to_remove == null) {
             return .all;
+        } else {
+            return .{ .one = to_remove.? };
         }
-
-        return .{ .one = to_remove };
     }
 
     pub fn strengthen(self: *Clause, to_remove: Literal) ClauseError!void {
@@ -209,14 +236,97 @@ pub const Clause = struct {
         self.pop();
         try self.calcAbstraction();
     }
+
+    pub fn is_deleted(self: *Clause) bool {
+        return self.header.mark == 1;
+    }
 };
 
 test "Clause" {
     const testing = std.testing;
     const test_allocator = testing.allocator;
-    const clause: Clause = try Clause.init(test_allocator, &[_]Literal{ Literal.init(1, true), Literal.init(2, false) }, false, false);
+    const clause: Clause = try Clause.init(
+        test_allocator,
+        &[_]Literal{ Literal.init(1, true), Literal.init(2, false) },
+        false,
+        false,
+    );
     defer clause.deinit();
     try testing.expect(clause.header.size == 2);
     try testing.expect(clause.header.learnt == false);
     try testing.expect(clause.header.has_extra == false);
+}
+
+pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type) type {
+    return struct {
+        const Self = @This();
+        const OccrMap = if (KHashContext == null)
+            std.AutoArrayHashMap(K, V)
+        else
+            std.ArrayHashMap(K, V, KHashContext.?, true);
+        const DirtyMap = if (KHashContext == null)
+            std.AutoArrayHashMap(K, u8)
+        else
+            std.ArrayHashMap(K, u8, KHashContext.?, true);
+
+        occs: OccrMap,
+        dirty: DirtyMap,
+        dirties: std.ArrayList(K),
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .occs = OccrMap.init(allocator),
+                .dirty = DirtyMap.init(allocator),
+                .dirties = std.ArrayList(K).init(allocator),
+            };
+        }
+
+        pub fn deinit(self: Self) void {
+            self.occs.deinit();
+            self.dirty.deinit();
+            self.dirties.deinit();
+        }
+
+        pub fn initKey(self: *Self, key: K) void {
+            var vec: ?*V = self.occs.getPtr(key);
+            if (vec != null) {
+                vec.?.clearRetainingCapacity();
+            }
+        }
+
+        pub fn clean(self: *Self, key: *K) void {
+            const value: *V = &self.occs.get(&key);
+            var count: usize = 0;
+            for (0..value.len) |i| {
+                if (!value[i].is_deleted()) {
+                    self.dirties[count] = self.dirties[i];
+                    count += 1;
+                }
+            }
+            value.shrinkAndFree(count);
+            self.dirty.put(key, 0);
+        }
+
+        pub fn cleanAll(self: *Self) void {
+            for (0..self.dirties.len) |i| {
+                if (self.dirty.get(&self.dirties[i]) != 0) {
+                    self.clean(&self.dirties[i]);
+                }
+            }
+            self.dirties.clearRetainingCapacity();
+        }
+
+        pub fn smudge(self: *Self, key: *K) void {
+            if (self.dirty.get(&key) == 0) {
+                self.dirty.put(key, 1);
+                self.dirties.push(*key);
+            }
+        }
+
+        pub fn clear(self: *Self) void {
+            self.occs.clearAndFree();
+            self.dirty.clearAndFree();
+            self.dirties.clearAndFree();
+        }
+    };
 }
