@@ -9,12 +9,17 @@ const OccList = types.OccList;
 
 pub const Solver = struct {
     ptr: *anyopaque,
+    deinitFn: *const fn (pointer: *anyopaque) void,
     newVarFn: *const fn (pointer: *anyopaque, upol: Lbool, dvar: bool) Var,
 
     fn init(ptr: anytype) Solver {
         const T = @TypeOf(ptr);
         const ptr_info = @typeInfo(T);
         const gen = struct {
+            pub fn deinit(pointer: *anyopaque) void {
+                const self: T = @ptrCast(@alignCast(pointer));
+                return ptr_info.Pointer.child.deinit(self);
+            }
             pub fn newVarFn(pointer: *anyopaque, upol: Lbool, dvar: bool) Var {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return ptr_info.Pointer.child.newVar(self, upol, dvar);
@@ -22,8 +27,13 @@ pub const Solver = struct {
         };
         return .{
             .ptr = ptr,
+            .deinitFn = gen.deinit,
             .newVarFn = gen.newVarFn,
         };
+    }
+
+    pub fn deinit(self: Solver) void {
+        return self.deinitFn(self.ptr);
     }
 
     pub fn newVar(self: Solver, upol: Lbool, dvar: bool) Var {
@@ -273,6 +283,36 @@ pub const MiniSAT = struct {
         return Solver.init(self);
     }
 
+    pub fn deinit(self: *MiniSAT) void {
+        self.model.deinit();
+        self.conflict.deinit();
+
+        self.clauses.deinit();
+        self.learnts.deinit();
+        self.trail.deinit();
+        self.trail_lim.deinit();
+        self.assumptions.deinit();
+
+        self.activity.deinit();
+        self.assigns.deinit();
+        self.polarity.deinit();
+        self.user_pol.deinit();
+        self.decision.deinit();
+        self.vardata.deinit();
+        self.watches.deinit();
+
+        self.order_heap.deinit();
+
+        self.clauseAllocator.deinit();
+
+        self.released_vars.deinit();
+        self.free_vars.deinit();
+        self.seen.deinit();
+        self.analyze_stack.deinit();
+        self.analyze_toclear.deinit();
+        self.add_tmp.deinit();
+    }
+
     pub fn newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
         var v: Var = undefined;
         if (self.free_vars.items.len > 0) {
@@ -370,7 +410,47 @@ pub const MiniSAT = struct {
 
     fn propagate(self: *MiniSAT) *Clause {
         // TODO:
-        _ = self;
+
+        // var conflict: ?Lit = null;
+        var num_props: u64 = 0;
+
+        while (self.qhead < self.trail.items.len) {
+            const p = self.trail.items[self.qhead];
+            self.qhead += 1;
+            const ws = self.watches.lookup(p).?;
+            num_props += 1;
+
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < ws.items.len) {
+                const blocker = ws.*.items[i].blocker;
+                if (self.litValue(blocker) == types.l_True) {
+                    i += 1;
+                    j += 1;
+                    continue;
+                }
+
+                const c = ws.*.items[i].clause;
+                const false_lit = p.neg();
+                if (c.get(0) == false_lit) {
+                    c.put(0, c.get(1));
+                    c.put(1, false_lit);
+                }
+                if (c.get(1) != false_lit) {
+                    @panic("literal 1 should be false literal");
+                }
+                i += 1;
+
+                const first = c.get(0);
+                const w = Watcher{ .clause = c, .blocker = first };
+                if (first == blocker and self.litValue(first) == types.l_True) {
+                    ws.*.items[j] = w;
+                    j += 1;
+                    continue;
+                }
+            }
+        }
+
         unreachable;
     }
 

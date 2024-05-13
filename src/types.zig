@@ -276,28 +276,42 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
         else
             std.ArrayHashMap(K, u8, KHashContext.?, true);
 
+        allocator: std.mem.Allocator,
         occs: OccrMap,
         dirty: DirtyMap,
         dirties: std.ArrayList(K),
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
+                .allocator = allocator,
                 .occs = OccrMap.init(allocator),
                 .dirty = DirtyMap.init(allocator),
                 .dirties = std.ArrayList(K).init(allocator),
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self.occs.deinit();
             self.dirty.deinit();
             self.dirties.deinit();
         }
 
+        pub fn getPtr(self: Self, key: K) ?*V {
+            return self.occs.getPtr(key);
+        }
+
+        pub fn lookup(self: Self, key: K) ?*V {
+            if (self.dirty.get(&key) == 0) {
+                self.dirty.put(key, 1);
+                self.dirties.append(key);
+            }
+            return self.occs.getPtr(key);
+        }
+
         pub fn initKey(self: *Self, key: K) void {
-            var vec: ?*V = self.occs.getPtr(key);
-            if (vec != null) {
-                vec.?.clearRetainingCapacity();
+            const vec: ?*V = self.occs.getPtr(key);
+            if (vec) |v| {
+                v.* = V.init(self.allocator);
             }
         }
 
@@ -330,7 +344,7 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             }
         }
 
-        pub fn clear(self: *Self) void {
+        pub fn clear(self: Self) void {
             self.occs.clearAndFree();
             self.dirty.clearAndFree();
             self.dirties.clearAndFree();

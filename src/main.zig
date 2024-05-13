@@ -74,9 +74,13 @@ pub fn main() !void {
     }
 
     var minisat = try MiniSAT.create(gpa);
+    defer gpa.destroy(minisat);
     var solver: Solver = minisat.solver();
-    _ = solver.newVar(.{ .value = 1 }, true);
-    _ = IntMap(u64, u32).init(gpa);
+    defer solver.deinit();
+    const v = solver.newVar(.{ .value = 1 }, true);
+    debug.print("variable: {}\n", .{v});
+    var map = IntMap(u64, u32).init(gpa);
+    defer map.deinit();
 }
 
 test {
