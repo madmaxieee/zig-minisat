@@ -11,6 +11,9 @@ pub const Literal = struct {
     pub inline fn eql(self: Literal, p: Literal) bool {
         return std.meta.eql(self, p);
     }
+    pub inline fn neq(self: Literal, p: Literal) bool {
+        return !self.eql(p);
+    }
     pub inline fn lt(self: Literal, p: Literal) bool {
         return self.x < p.x;
     }
@@ -21,7 +24,7 @@ pub const Literal = struct {
         return .{ .x = self.x ^ @intFromBool(b) };
     }
     pub inline fn sign(self: Literal) bool {
-        return self.x & 1;
+        return (self.x & 1) != 0;
     }
     pub inline fn variable(self: Literal) Variable {
         return self.x >> 1;
@@ -31,7 +34,7 @@ pub const Literal = struct {
     }
 };
 
-pub fn literalLessThan(context: anytype, lhs: Literal, rhs: Literal) bool {
+pub fn literalLessThan(context: void, lhs: Literal, rhs: Literal) bool {
     _ = context;
     return lhs.lt(rhs);
 }
@@ -68,20 +71,23 @@ pub const LiftedBool = struct {
         return LiftedBool{ .value = @intFromBool(v) };
     }
     pub inline fn eql(self: LiftedBool, b: LiftedBool) bool {
-        return ((b.value & 2) & (self.value & 2)) | (!(b.value & 2) & (self.value == b.value));
+        return ((b.value & 2) & (self.value & 2)) != 0 or ((b.value & 2 == 0) and (self.value == b.value));
+    }
+    pub inline fn neq(self: LiftedBool, b: LiftedBool) bool {
+        return !self.eql(b);
     }
     pub inline fn xor(self: LiftedBool, b: bool) LiftedBool {
-        return LiftedBool.init(self.value ^ @intFromBool(b));
+        return LiftedBool{ .value = self.value ^ @intFromBool(b) };
     }
     pub inline fn @"and"(self: LiftedBool, b: LiftedBool) bool {
         const sel: u8 = (self.value << 1) | (b.value << 3);
         const v: u8 = (0xF7F755F4 >> sel) & 3;
-        return .{ .value = v };
+        return LiftedBool{ .value = v };
     }
     pub inline fn @"or"(self: LiftedBool, b: LiftedBool) bool {
         const sel: u8 = (self.value << 1) | (b.value << 3);
         const v: u8 = (0xFCFCF400 >> sel) & 3;
-        return .{ .value = v };
+        return LiftedBool{ .value = v };
     }
 };
 
@@ -173,6 +179,10 @@ pub const Clause = struct {
 
     pub inline fn get(self: *Clause, i: usize) Literal {
         return self.data[i].lit;
+    }
+
+    pub inline fn put(self: *Clause, i: usize, p: Literal) void {
+        self.data[i] = .{ .lit = p };
     }
 
     pub inline fn activity(self: *Clause) ClauseError!f32 {
@@ -270,11 +280,11 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
         const OccrMap = if (KHashContext == null)
             std.AutoArrayHashMap(K, V)
         else
-            std.ArrayHashMap(K, V, KHashContext.?, true);
+            std.ArrayHashMap(K, V, KHashContext.?, false);
         const DirtyMap = if (KHashContext == null)
-            std.AutoArrayHashMap(K, u8)
+            std.AutoArrayHashMap(K, bool)
         else
-            std.ArrayHashMap(K, u8, KHashContext.?, true);
+            std.ArrayHashMap(K, bool, KHashContext.?, false);
 
         allocator: std.mem.Allocator,
         occs: OccrMap,
@@ -300,10 +310,10 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             return self.occs.getPtr(key);
         }
 
-        pub fn lookup(self: Self, key: K) ?*V {
-            if (self.dirty.get(&key) == 0) {
-                self.dirty.put(key, 1);
-                self.dirties.append(key);
+        pub fn lookup(self: *Self, key: K) !?*V {
+            if (self.dirty.get(key) == false) {
+                try self.dirty.put(key, true);
+                try self.dirties.append(key);
             }
             return self.occs.getPtr(key);
         }
@@ -315,17 +325,17 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             }
         }
 
-        pub fn clean(self: *Self, key: *K) void {
-            const value: *V = &self.occs.get(&key);
-            var count: usize = 0;
-            for (0..value.len) |i| {
+        pub fn clean(self: *Self, key: K) void {
+            const value: *V = self.occs.getPtr(key).?;
+            var j: usize = 0;
+            for (0..value.items.len) |i| {
                 if (!value[i].is_deleted()) {
-                    self.dirties[count] = self.dirties[i];
-                    count += 1;
+                    self.dirties[j] = self.dirties[i];
+                    j += 1;
                 }
             }
-            value.shrinkAndFree(count);
-            self.dirty.put(key, 0);
+            value.shrinkAndFree(value.items.len - j);
+            self.dirty.put(key, false);
         }
 
         pub fn cleanAll(self: *Self) void {
@@ -337,10 +347,10 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             self.dirties.clearRetainingCapacity();
         }
 
-        pub fn smudge(self: *Self, key: *K) void {
-            if (self.dirty.get(&key) == 0) {
-                self.dirty.put(key, 1);
-                self.dirties.push(*key);
+        pub fn smudge(self: *Self, key: K) void {
+            if (self.dirty.get(key) == false) {
+                self.dirty.put(key, true);
+                self.dirties.push(key);
             }
         }
 

@@ -10,7 +10,8 @@ const OccList = types.OccList;
 pub const Solver = struct {
     ptr: *anyopaque,
     deinitFn: *const fn (pointer: *anyopaque) void,
-    newVarFn: *const fn (pointer: *anyopaque, upol: Lbool, dvar: bool) Var,
+    newVarFn: *const fn (pointer: *anyopaque) Var,
+    addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
 
     fn init(ptr: anytype) Solver {
         const T = @TypeOf(ptr);
@@ -20,15 +21,20 @@ pub const Solver = struct {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return ptr_info.Pointer.child.deinit(self);
             }
-            pub fn newVarFn(pointer: *anyopaque, upol: Lbool, dvar: bool) Var {
+            pub fn newVarFn(pointer: *anyopaque) Var {
                 const self: T = @ptrCast(@alignCast(pointer));
-                return ptr_info.Pointer.child.newVar(self, upol, dvar);
+                return ptr_info.Pointer.child.newVar(self, types.l_Undef, true);
+            }
+            pub fn addClauseFn(pointer: *anyopaque, ps: []const Lit) anyerror!bool {
+                const self: T = @ptrCast(@alignCast(pointer));
+                return ptr_info.Pointer.child.addClause(self, ps);
             }
         };
         return .{
             .ptr = ptr,
             .deinitFn = gen.deinit,
             .newVarFn = gen.newVarFn,
+            .addClauseFn = gen.addClauseFn,
         };
     }
 
@@ -36,8 +42,12 @@ pub const Solver = struct {
         return self.deinitFn(self.ptr);
     }
 
-    pub fn newVar(self: Solver, upol: Lbool, dvar: bool) Var {
-        return self.newVarFn(self.ptr, upol, dvar);
+    pub fn newVar(self: Solver) Var {
+        return self.newVarFn(self.ptr);
+    }
+
+    pub fn addClause(self: Solver, ps: []const Lit) anyerror!bool {
+        return self.addClauseFn(self.ptr, ps);
     }
 };
 
@@ -131,6 +141,7 @@ pub const MiniSAT = struct {
     num_clauses: u64,
     num_learnts: u64,
     clauses_literals: u64,
+    learnt_literals: u64,
     max_literals: u64,
     tot_literals: u64,
 
@@ -152,9 +163,9 @@ pub const MiniSAT = struct {
     ok: bool,
     cla_inc: f64,
     var_inc: f64,
-    qhead: i32,
+    qhead: usize,
     simpDB_assigns: i32,
-    simpDB_props: i64,
+    simpDB_props: u64,
     progress_estimate: f64,
     remove_satisfied: bool,
 
@@ -225,6 +236,7 @@ pub const MiniSAT = struct {
             .num_clauses = 0,
             .num_learnts = 0,
             .clauses_literals = 0,
+            .learnt_literals = 0,
             .max_literals = 0,
             .tot_literals = 0,
 
@@ -344,7 +356,7 @@ pub const MiniSAT = struct {
         }
     }
 
-    pub fn addClause(self: *MiniSAT, ps: []Lit) bool {
+    pub fn addClause(self: *MiniSAT, ps: []const Lit) !bool {
         if (self.decisionLevel() != 0) {
             unreachable;
         }
@@ -353,7 +365,7 @@ pub const MiniSAT = struct {
             return false;
         }
 
-        self.add_tmp.ensureTotalCapacity(ps.len) catch false;
+        try self.add_tmp.resize(ps.len);
         std.mem.copyForwards(Lit, self.add_tmp.items, ps);
         self.add_tmp.shrinkRetainingCapacity(ps.len);
         std.mem.sort(
@@ -366,33 +378,38 @@ pub const MiniSAT = struct {
         var _ps = self.add_tmp.items;
         var count: usize = 0;
         var p = types.lit_Undef;
-        for (0..self.add_tmp.len) |i| {
-            if (self.litValue(_ps.items[i]) == types.l_True or _ps.items[i] == p.neg()) {
+        for (0..self.add_tmp.items.len) |i| {
+            if (self.litValue(_ps[i]).eql(types.l_True) or _ps[i].eql(p.neg())) {
                 return true;
-            } else if (self.litValue(_ps.items[i]) != types.l_False and _ps.items[i] != p) {
-                p = _ps.items[i];
-                _ps.items[count] = _ps.items[i];
+            } else if (self.litValue(_ps[i]).neq(types.l_False) and _ps[i].neq(p)) {
+                p = _ps[i];
+                _ps[count] = _ps[i];
                 count += 1;
             }
         }
-        self.add_tmp.shrinkAndFree(self.add_tmp.len - count);
+        self.add_tmp.shrinkAndFree(self.add_tmp.items.len - count);
 
         if (self.add_tmp.items.len == 0) {
             self.ok = false;
             return false;
         } else if (self.add_tmp.items.len == 1) {
             self.uncheckedEnqueue(_ps[0], null);
-            // TODO:
+            self.ok = try self.propagate() == null;
+            return self.ok;
         } else {
-            // TODO:
+            const alloc = self.clauseAllocator.allocator();
+            const c = try alloc.create(Clause);
+            c.* = try Clause.init(self.clauseAllocator.allocator(), _ps, false, false);
+            try self.clauses.append(c);
+            try self.attachClause(c);
         }
 
         return true;
     }
 
     fn uncheckedEnqueue(self: *MiniSAT, p: Lit, from: ?*Clause) void {
-        if (self.litValue(p) != types.l_Undef) {
-            unreachable;
+        if (self.litValue(p).neq(types.l_Undef)) {
+            @panic("literal value must be undefined");
         }
         self.assigns.put(
             p.variable(),
@@ -408,50 +425,118 @@ pub const MiniSAT = struct {
         self.trail.append(p) catch unreachable;
     }
 
-    fn propagate(self: *MiniSAT) *Clause {
-        // TODO:
-
-        // var conflict: ?Lit = null;
+    fn propagate(self: *MiniSAT) !?*Clause {
+        var conflict: ?*Clause = null;
         var num_props: u64 = 0;
 
         while (self.qhead < self.trail.items.len) {
             const p = self.trail.items[self.qhead];
             self.qhead += 1;
-            const ws = self.watches.lookup(p).?;
+            const ws = (try self.watches.lookup(p)).?;
             num_props += 1;
 
             var i: usize = 0;
             var j: usize = 0;
-            while (i < ws.items.len) {
+            next_clause: while (i < ws.items.len) {
                 const blocker = ws.*.items[i].blocker;
-                if (self.litValue(blocker) == types.l_True) {
+                if (self.litValue(blocker).eql(types.l_True)) {
                     i += 1;
                     j += 1;
                     continue;
                 }
 
+                // Make sure the false literal is data[1]:
                 const c = ws.*.items[i].clause;
                 const false_lit = p.neg();
-                if (c.get(0) == false_lit) {
+                if (c.get(0).eql(false_lit)) {
                     c.put(0, c.get(1));
                     c.put(1, false_lit);
                 }
-                if (c.get(1) != false_lit) {
+                if (c.get(1).neq(false_lit)) {
                     @panic("literal 1 should be false literal");
                 }
                 i += 1;
 
+                // If 0th watch is true, then clause is already satisfied.
                 const first = c.get(0);
                 const w = Watcher{ .clause = c, .blocker = first };
-                if (first == blocker and self.litValue(first) == types.l_True) {
+                if (!first.eql(blocker) and self.litValue(first).eql(types.l_True)) {
                     ws.*.items[j] = w;
                     j += 1;
                     continue;
                 }
+
+                // Look for new watch:
+                for (2..c.header.size) |k| {
+                    if (self.litValue(c.get(k)).neq(types.l_False)) {
+                        c.put(1, c.get(k));
+                        c.put(k, false_lit);
+                        self.watches.getPtr(c.get(1).neg()).?.append(w) catch unreachable;
+                        continue :next_clause;
+                    }
+                }
+
+                // Did not find watch -- clause is unit under assignment:
+                ws.items[j] = w;
+                j += 1;
+                if (self.litValue(first).eql(types.l_False)) {
+                    conflict = c;
+                    self.qhead = self.trail.items.len;
+                    // copy the remaining watches:
+                    while (i < ws.items.len) {
+                        ws.*.items[j] = ws.*.items[i];
+                        j += 1;
+                        i += 1;
+                    }
+                } else {
+                    self.uncheckedEnqueue(first, c);
+                }
             }
+            ws.shrinkAndFree(ws.items.len - j);
+        }
+        self.propagations += num_props;
+        self.simpDB_props -= num_props;
+
+        return conflict;
+    }
+
+    fn attachClause(self: *MiniSAT, c: *Clause) !void {
+        if (c.header.size <= 1) {
+            @panic("attachClause: clause size must be > 1");
+        }
+        try self.watches.getPtr(c.get(0).neg()).?.append(Watcher{ .clause = c, .blocker = c.get(1) });
+        try self.watches.getPtr(c.get(1).neg()).?.append(Watcher{ .clause = c, .blocker = c.get(0) });
+        if (c.header.learnt) {
+            self.num_learnts += 1;
+            self.learnt_literals += c.header.size;
+        } else {
+            self.num_clauses += 1;
+            self.clauses_literals += c.header.size;
+        }
+    }
+
+    fn detachClause(self: *MiniSAT, c: *Clause, strict: bool) void {
+        if (c.header.size <= 1) {
+            @panic("detachClause: clause size must be > 1");
         }
 
-        unreachable;
+        if (strict) {
+            self.watches.getPtr(c.get(0).neg()).?
+                .orderedRemove(Watcher{ .clause = c, .blocker = c.get(1) });
+            self.watches.getPtr(c.get(1).neg()).?
+                .orderedRemove(Watcher{ .clause = c, .blocker = c.get(0) });
+        } else {
+            self.watches.smudge(c.get(0).neg());
+            self.watches.smudge(c.get(1).neg());
+        }
+
+        if (c.header.learnt) {
+            self.num_learnts -= 1;
+            self.learnt_literals -= c.header.size;
+        } else {
+            self.num_clauses -= 1;
+            self.clauses_literals -= c.header.size;
+        }
     }
 
     inline fn reason(self: MiniSAT, x: Var) ?*Clause {
@@ -540,7 +625,7 @@ pub const MiniSAT = struct {
     }
 
     inline fn litValue(self: MiniSAT, l: Lit) Lbool {
-        return self.assigns.get(l.variable()).? ^ @as(i32, l.sign());
+        return self.assigns.get(l.variable()).?.xor(l.sign());
     }
 
     inline fn varValue(self: MiniSAT, x: Var) Lbool {

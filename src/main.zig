@@ -9,6 +9,9 @@ const MiniSAT = @import("solver.zig").MiniSAT;
 const Solver = @import("solver.zig").Solver;
 const IntMap = @import("int_map.zig").IntMap;
 
+const types = @import("types.zig");
+const Lit = types.Literal;
+
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_impl.deinit();
@@ -77,8 +80,19 @@ pub fn main() !void {
     defer gpa.destroy(minisat);
     var solver: Solver = minisat.solver();
     defer solver.deinit();
-    const v = solver.newVar(.{ .value = 1 }, true);
-    debug.print("variable: {}\n", .{v});
+
+    const num_vars = 10;
+    var variables = [_]i32{0} ** num_vars;
+    for (0..num_vars) |i| {
+        variables[i] = solver.newVar();
+    }
+    for (variables) |v| {
+        debug.print("{d} ", .{v});
+    }
+    for (variables) |v| {
+        _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
+    }
+
     var map = IntMap(u64, u32).init(gpa);
     defer map.deinit();
 }
