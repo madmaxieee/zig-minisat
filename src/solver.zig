@@ -106,6 +106,7 @@ pub const MiniSAT = struct {
         i: i32,
         lit: Lit,
     };
+    const Seen = enum { undef, source, removable, failed };
 
     allocator: std.mem.Allocator,
     clauseAllocator: std.heap.ArenaAllocator,
@@ -178,7 +179,7 @@ pub const MiniSAT = struct {
     free_vars: std.ArrayList(Var),
 
     // temps
-    seen: VariableMap(bool),
+    seen: VariableMap(Seen),
     analyze_stack: std.ArrayList(AnalyzeStackElement),
     analyze_toclear: std.ArrayList(Lit),
     add_tmp: std.ArrayList(Lit),
@@ -276,7 +277,7 @@ pub const MiniSAT = struct {
             .released_vars = std.ArrayList(Var).init(allocator),
             .free_vars = std.ArrayList(Var).init(allocator),
 
-            .seen = VariableMap(bool).init(allocator),
+            .seen = VariableMap(Seen).init(allocator),
             .analyze_stack = std.ArrayList(AnalyzeStackElement).init(allocator),
             .analyze_toclear = std.ArrayList(Lit).init(allocator),
             .add_tmp = std.ArrayList(Lit).init(allocator),
@@ -343,7 +344,7 @@ pub const MiniSAT = struct {
         self.assigns.put(v, types.l_Undef) catch unreachable;
         self.vardata.put(v, VarData{ .reason = null, .level = 0 }) catch unreachable;
         self.activity.put(v, if (self.rnd_init_act) self.rand.float(f64) else 0) catch unreachable;
-        self.seen.put(v, false) catch unreachable;
+        self.seen.put(v, .undef) catch unreachable;
         self.polarity.put(v, true) catch unreachable;
         self.user_pol.put(v, upol) catch unreachable;
         self.decision.ensureTotalCapacity(@intCast(v)) catch unreachable;
@@ -372,10 +373,10 @@ pub const MiniSAT = struct {
             removeSatisfied(self.clauses.items);
 
             for (self.released_vars.items) |v| {
-                if (self.seen.get(v)) {
+                if (self.seen.get(v) != .undef) {
                     @panic("seen must be false");
                 }
-                self.seen.put(v, true);
+                self.seen.put(v, .source);
             }
 
             var j: usize = 0;
@@ -389,7 +390,7 @@ pub const MiniSAT = struct {
             self.qhead = self.trail.items.len;
 
             for (self.released_vars.items) |v| {
-                self.seen.put(v, false);
+                self.seen.put(v, .undef);
             }
 
             self.free_vars.append(self.released_vars.items);
@@ -404,8 +405,86 @@ pub const MiniSAT = struct {
         return true;
     }
 
+    fn solve(self: *MiniSAT) Lbool {
+        self.model.clearAndFree();
+        self.conflict.clearAndFree();
+
+        if (!self.ok) {
+            return types.l_False;
+        }
+
+        self.solves += 1;
+
+        self.max_learnts = @max(self.num_clauses * self.learntsize_factor, self.min_learnts_lim);
+
+        self.learntsize_adjust_confl = self.learntsize_adjust_start_confl;
+        self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
+        var status: Lbool = types.l_Undef;
+
+        if (self.verbosity >= std.log.Level.info) {
+            const stdio_writer = std.io.getStdOut().writer();
+            try stdio_writer.write(
+                \\============================[ Search Statistics ]==============================
+                \\| Conflicts |          ORIGINAL         |          LEARNT          | Progress |
+                \\|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |
+                \\===============================================================================
+                \\
+            );
+        }
+
+        var curr_restarts: u32 = 0;
+        while (status.eql(types.l_Undef)) {
+            const rest_base = if (self.luby_restart)
+                luby(self.restart_inc, @floatFromInt(curr_restarts))
+            else
+                std.math.pow(f64, self.restart_inc, @floatFromInt(curr_restarts));
+            // TODO:
+            _ = rest_base;
+            // status = self.search(@intCast(self.conflict_budget.?), @intCast(self.propagation_budget.?));
+            if (!self.withinBudget()) {
+                break;
+            }
+            curr_restarts += 1;
+        }
+
+        // TODO:
+
+        unreachable;
+    }
+
+    fn search(self: *MiniSAT, nof_conflicts: i32) !Lbool {
+        if (!self.ok) {
+            @panic("search() called when not ok");
+        }
+
+        var conflictC: u64 = 0;
+        var learnt_clause = std.ArrayList(Lit).init(self.allocator);
+        defer learnt_clause.deinit();
+        self.starts += 1;
+
+        while (true) {
+            const confl = try self.propagate();
+            if (confl != null) {
+                self.conflicts += 1;
+                conflictC += 1;
+                if (self.decisionLevel() == 0) {
+                    return types.l_False;
+                }
+
+                learnt_clause.clearRetainingCapacity();
+
+                // TODO:
+
+            } else {}
+        }
+
+        // TODO:
+        _ = nof_conflicts;
+        unreachable;
+    }
+
     fn releaseVar(self: *MiniSAT, l: Lit) void {
-        if (self.litValue(l) == types.l_Undef) {
+        if (self.litValue(l).eql(types.l_Undef)) {
             addClause(.{l});
             self.released_vars.append(l.variable());
         }
@@ -457,6 +536,156 @@ pub const MiniSAT = struct {
             c.* = try Clause.init(self.clauseAllocator.allocator(), _ps, false, false);
             try self.clauses.append(c);
             try self.attachClause(c);
+        }
+
+        return true;
+    }
+
+    fn analyze(self: *MiniSAT, _conflict: *Clause, out_learnt: *std.ArrayList(Lit), out_btlevel: *i32) !void {
+        var pathC: i32 = 0;
+        var p: ?Lit = null;
+        var index: usize = self.trail.items.len - 1;
+        var conflict: *Clause = _conflict;
+
+        while (true) : (pathC -= 1) {
+            if (conflict.header.learnt) {
+                self.claBumpActivity(conflict);
+            }
+
+            for ((if (p == null) 0 else 1)..conflict.header.size) |j| {
+                const q = conflict.get(j);
+                if (!self.seen.get(q.variable()).? and self.level(q.variable()) > 0) {
+                    self.varBumpActivity(q.variable());
+                    try self.seen.put(q.variable(), .source);
+                    if (self.level(q.variable()) >= self.decisionLevel()) {
+                        pathC += 1;
+                    } else {
+                        try out_learnt.append(q);
+                    }
+                }
+            }
+
+            while (!self.seen.get(self.trail.items[index].variable()).?) : (index -= 1) {}
+
+            p = self.trail.items[index + 1];
+            conflict = self.reason(p.variable());
+            try self.seen.put(p.variable(), .undef);
+            pathC -= 1;
+
+            if (pathC <= 0) {
+                break;
+            }
+        }
+        out_learnt.items[0] = p.neg();
+
+        std.mem.copyBackwards(Lit, self.analyze_toclear.items, out_learnt.items);
+
+        // Simplify conflict clause:
+        var j: usize = 0;
+        switch (self.ccmin_mode) {
+            .deep => {
+                for (out_learnt.items) |l| {
+                    if (self.reason(l.variable()) == null or !self.litRedundant(l)) {
+                        out_learnt.items[j] = l;
+                        j += 1;
+                    }
+                }
+            },
+            .basic => {
+                for (out_learnt.items) |l| {
+                    const v_learnt = l.variable();
+                    if (self.reason(v_learnt) == null) {
+                        out_learnt.items[j] = l;
+                        j += 1;
+                    } else {
+                        const c = self.reason(v_learnt).?;
+                        for (1..c.header.size) |k| {
+                            const v = c.get(k).variable();
+                            if (!self.seen.get(v).? and self.level(v) > 0) {
+                                out_learnt.items[j] = l;
+                                j += 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            },
+            .none => {
+                j = out_learnt.len;
+            },
+        }
+
+        self.max_literals += out_learnt.items.len;
+        out_learnt.shrinkRetainingCapacity(out_learnt.items.len - j);
+        self.tot_literals += out_learnt.items.len;
+
+        if (out_learnt.items.len == 1) {
+            out_btlevel.* = 0;
+        } else {
+            var max_i: usize = 1;
+            for (2..out_learnt.items.len) |i| {
+                if (self.level(out_learnt.items[i].variable()) > self.level(out_learnt.items[max_i].variable())) {
+                    max_i = i;
+                }
+            }
+            const p2 = out_learnt.items[max_i];
+            out_learnt.items[max_i] = out_learnt.items[1];
+            out_learnt.items[1] = p2;
+            out_btlevel.* = self.level(p2.variable());
+        }
+
+        for (self.analyze_toclear.items) |l| {
+            try self.seen.put(l.variable(), .undef);
+        }
+    }
+
+    fn litRedundant(self: MiniSAT, p: Lit) !bool {
+        if (!(self.seen.get(p.variable()).? == .undef or self.seen.get(p.variable()).? == .source)) {
+            @panic("seen must be undef or source");
+        }
+        if (self.reason(p.variable()) == null) {
+            @panic("reason must not be null");
+        }
+
+        self.analyze_stack.clearAndFree();
+        var c: *Clause = self.reason(p.variable()).?;
+
+        var i: usize = 1;
+        while (true) : (i += 1) {
+            if (i < c.header.size) {
+                const l = c.get(i);
+                if (self.level(l.variable()) == 0 or self.seen.get(l.variable()).? == .source or self.seen.get(l.variable()).? == .removable) {
+                    continue;
+                }
+                if (self.reason(l.variable()) == null or self.seen.get(l.variable()).? == .failed) {
+                    self.analyze_stack.append(AnalyzeStackElement{ .i = 0, .lit = p });
+                    for (self.analyze_stack.items) |e| {
+                        if (self.seen.get(e.lit.variable()).? == .undef) {
+                            try self.seen.put(e.lit.variable(), .failed);
+                            try self.analyze_toclear.append(e.lit);
+                        }
+                    }
+                    return false;
+                }
+                try self.analyze_stack.append(AnalyzeStackElement{ .i = i, .lit = p });
+                i = 0;
+                p = l;
+                c = self.reason(l.variable()).?;
+            } else {
+                if (self.seen.get(p.variable()).? == .undef) {
+                    try self.seen.put(p.variable(), .removable);
+                    try self.analyze_toclear.append(p);
+                }
+                if (self.analyze_stack.items.len == 0) {
+                    break;
+                }
+
+                i = self.analyze_stack.items[self.analyze_stack.items.len - 1].i;
+                p = self.analyze_stack.items[self.analyze_stack.items.len - 1].lit;
+                c = self.reason(p.variable()).?;
+
+                self.analyze_stack.pop();
+            }
         }
 
         return true;
@@ -806,3 +1035,19 @@ pub const MiniSAT = struct {
             !self.asynch_interrupt;
     }
 };
+
+/// Find the finite luby subsequence that contains index 'x', and the
+fn luby(y: f64, x: i32) f64 {
+    var size: usize = 1;
+    var seq: usize = 0;
+    while (size < x + 1) {
+        seq += 1;
+        size = 2 * size + 1;
+    }
+    while (size - 1 != x) {
+        size = (size - 1) >> 1;
+        seq -= 1;
+        x %= size;
+    }
+    return std.math.pow(f64, y, @floatFromInt(seq));
+}
