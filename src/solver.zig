@@ -107,6 +107,9 @@ pub const MiniSAT = struct {
         lit: Lit,
     };
 
+    allocator: std.mem.Allocator,
+    clauseAllocator: std.heap.ArenaAllocator,
+
     model: std.ArrayList(Lbool),
     conflict: LiteralSet,
 
@@ -164,19 +167,18 @@ pub const MiniSAT = struct {
     cla_inc: f64,
     var_inc: f64,
     qhead: usize,
-    simpDB_assigns: i32,
+    simpDB_assigns: usize,
     simpDB_props: u64,
     progress_estimate: f64,
     remove_satisfied: bool,
 
     next_var: Var,
-    clauseAllocator: std.heap.ArenaAllocator,
 
     released_vars: std.ArrayList(Var),
     free_vars: std.ArrayList(Var),
 
     // temps
-    seen: VariableMap(u8),
+    seen: VariableMap(bool),
     analyze_stack: std.ArrayList(AnalyzeStackElement),
     analyze_toclear: std.ArrayList(Lit),
     add_tmp: std.ArrayList(Lit),
@@ -202,6 +204,9 @@ pub const MiniSAT = struct {
         });
 
         self.* = MiniSAT{
+            .allocator = allocator,
+            .clauseAllocator = std.heap.ArenaAllocator.init(allocator),
+
             .model = std.ArrayList(Lbool).init(allocator),
             .conflict = LiteralSet.init(allocator),
 
@@ -261,18 +266,17 @@ pub const MiniSAT = struct {
             .cla_inc = 1,
             .var_inc = 1,
             .qhead = 0,
-            .simpDB_assigns = -1,
+            .simpDB_assigns = 0,
             .simpDB_props = 0,
             .progress_estimate = 0,
             .remove_satisfied = true,
 
             .next_var = 0,
-            .clauseAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 
             .released_vars = std.ArrayList(Var).init(allocator),
             .free_vars = std.ArrayList(Var).init(allocator),
 
-            .seen = VariableMap(u8).init(allocator),
+            .seen = VariableMap(bool).init(allocator),
             .analyze_stack = std.ArrayList(AnalyzeStackElement).init(allocator),
             .analyze_toclear = std.ArrayList(Lit).init(allocator),
             .add_tmp = std.ArrayList(Lit).init(allocator),
@@ -325,7 +329,7 @@ pub const MiniSAT = struct {
         self.add_tmp.deinit();
     }
 
-    pub fn newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
+    fn newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
         var v: Var = undefined;
         if (self.free_vars.items.len > 0) {
             v = self.free_vars.pop();
@@ -339,7 +343,7 @@ pub const MiniSAT = struct {
         self.assigns.put(v, types.l_Undef) catch unreachable;
         self.vardata.put(v, VarData{ .reason = null, .level = 0 }) catch unreachable;
         self.activity.put(v, if (self.rnd_init_act) self.rand.float(f64) else 0) catch unreachable;
-        self.seen.put(v, 0) catch unreachable;
+        self.seen.put(v, false) catch unreachable;
         self.polarity.put(v, true) catch unreachable;
         self.user_pol.put(v, upol) catch unreachable;
         self.decision.ensureTotalCapacity(@intCast(v)) catch unreachable;
@@ -349,14 +353,65 @@ pub const MiniSAT = struct {
         return v;
     }
 
-    pub fn releaseVar(self: *MiniSAT, l: Lit) void {
+    fn simplify(self: *MiniSAT) !bool {
+        if (self.decisionLevel() != 0) {
+            @panic("simplify() called when not at decision level 0");
+        }
+
+        if (!self.ok or (try self.propagate()) != null) {
+            self.ok = false;
+            return false;
+        }
+        if (self.nAssigns() == self.simpDB_assigns or self.simpDB_props > 0) {
+            return true;
+        }
+
+        removeSatisfied(self.learnts.items);
+
+        if (self.remove_satisfied) {
+            removeSatisfied(self.clauses.items);
+
+            for (self.released_vars.items) |v| {
+                if (self.seen.get(v)) {
+                    @panic("seen must be false");
+                }
+                self.seen.put(v, true);
+            }
+
+            var j: usize = 0;
+            for (self.trail.items) |lit| {
+                if (!self.seen.get(lit.variable())) {
+                    self.trail.items[j] = lit;
+                    j += 1;
+                }
+            }
+            self.trail.shrinkRetainingCapacity(self.trail.items.len - j);
+            self.qhead = self.trail.items.len;
+
+            for (self.released_vars.items) |v| {
+                self.seen.put(v, false);
+            }
+
+            self.free_vars.append(self.released_vars.items);
+            self.released_vars.clearRetainingCapacity();
+        }
+
+        self.rebuildOrderHeap();
+
+        self.simpDB_assigns = self.nAssigns();
+        self.simpDB_props = self.clauses_literals + self.learnt_literals;
+
+        return true;
+    }
+
+    fn releaseVar(self: *MiniSAT, l: Lit) void {
         if (self.litValue(l) == types.l_Undef) {
             addClause(.{l});
             self.released_vars.append(l.variable());
         }
     }
 
-    pub fn addClause(self: *MiniSAT, ps: []const Lit) !bool {
+    fn addClause(self: *MiniSAT, ps: []const Lit) !bool {
         if (self.decisionLevel() != 0) {
             unreachable;
         }
@@ -537,6 +592,62 @@ pub const MiniSAT = struct {
             self.num_clauses -= 1;
             self.clauses_literals -= c.header.size;
         }
+    }
+
+    fn removeClause(self: *MiniSAT, c: *Clause) void {
+        self.detachClause(c, true);
+        if (self.locked(c)) {
+            self.vardata.get(c.get(0).variable()).?.reason = null;
+        }
+        c.mark(1);
+        self.clauseAllocator.allocator().destroy(c);
+    }
+
+    fn satisfied(self: *MiniSAT, c: *Clause) bool {
+        for (0..c.header.size) |i| {
+            if (self.litValue(c.get(i)).eql(types.l_True)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn removeSatisfied(self: *MiniSAT, clauses: []*Clause) void {
+        var j: usize = 0;
+        for (clauses) |i| {
+            const c = clauses[i];
+            if (self.satisfied(c)) {
+                self.removeClause(c);
+            } else {
+                if (self.litValue(c.get(0)).neq(types.l_Undef) or
+                    self.litValue(c.get(1)).neq(types.l_Undef))
+                {
+                    @panic("removeSatisfied: literal value must be undefined");
+                }
+                var k: usize = 2;
+                while (k < c.header.size) : (k += 1) {
+                    if (self.litValue(c.get(k)).eql(types.l_False)) {
+                        c.put(k, c.get(c.header.size - 1));
+                        k -= 1;
+                        c.pop();
+                    }
+                }
+                clauses[j] = c;
+                j += 1;
+            }
+        }
+        clauses.shrinkAndFree(clauses.len - j);
+    }
+
+    fn rebuildOrderHeap(self: *MiniSAT) void {
+        var heap_vars = std.ArrayList(Var).init(self.allocator);
+        var v: Var = 0;
+        while (v < self.nVars()) : (v += 1) {
+            if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
+                heap_vars.append(v);
+            }
+        }
+        self.order_heap.fromOwnedSlice(self.allocator, self.activity.items);
     }
 
     inline fn reason(self: MiniSAT, x: Var) ?*Clause {
