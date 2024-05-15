@@ -15,45 +15,66 @@ pub const SolverResult = enum {
 
 pub const Solver = struct {
     ptr: *anyopaque,
-    deinitFn: *const fn (pointer: *anyopaque) void,
-    newVarFn: *const fn (pointer: *anyopaque) Var,
-    addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
+    vtable: VTable,
 
-    fn init(ptr: anytype) Solver {
+    const VTable = struct {
+        deinitFn: *const fn (pointer: *anyopaque) void,
+        newVarFn: *const fn (pointer: *anyopaque) Var,
+        addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
+        solveFn: *const fn (pointer: *anyopaque) SolverResult,
+    };
+
+    fn init(
+        ptr: anytype,
+        comptime deinitFn: *const fn (pointer: @TypeOf(ptr)) void,
+        comptime newVarFn: *const fn (pointer: @TypeOf(ptr)) Var,
+        comptime addClauseFn: *const fn (pointer: @TypeOf(ptr), ps: []const Lit) anyerror!bool,
+        comptime solveFn: *const fn (pointer: @TypeOf(ptr)) SolverResult,
+    ) Solver {
         const T = @TypeOf(ptr);
-        const ptr_info = @typeInfo(T);
-        const gen = struct {
+        const vtable = struct {
             pub fn deinit(pointer: *anyopaque) void {
                 const self: T = @ptrCast(@alignCast(pointer));
-                return ptr_info.Pointer.child.deinit(self);
+                return deinitFn(self);
             }
-            pub fn newVarFn(pointer: *anyopaque) Var {
+            pub fn newVar(pointer: *anyopaque) Var {
                 const self: T = @ptrCast(@alignCast(pointer));
-                return ptr_info.Pointer.child.newVar(self, types.l_Undef, true);
+                return newVarFn(self);
             }
-            pub fn addClauseFn(pointer: *anyopaque, ps: []const Lit) anyerror!bool {
+            pub fn addClause(pointer: *anyopaque, ps: []const Lit) anyerror!bool {
                 const self: T = @ptrCast(@alignCast(pointer));
-                return ptr_info.Pointer.child.addClause(self, ps);
+                return addClauseFn(self, ps);
+            }
+            pub fn solve(pointer: *anyopaque) SolverResult {
+                const self: T = @ptrCast(@alignCast(pointer));
+                return solveFn(self);
             }
         };
         return .{
             .ptr = ptr,
-            .deinitFn = gen.deinit,
-            .newVarFn = gen.newVarFn,
-            .addClauseFn = gen.addClauseFn,
+            .vtable = .{
+                .deinitFn = vtable.deinit,
+                .newVarFn = vtable.newVar,
+                .addClauseFn = vtable.addClause,
+                .solveFn = vtable.solve,
+            },
         };
     }
 
     pub fn deinit(self: Solver) void {
-        return self.deinitFn(self.ptr);
+        return self.vtable.deinitFn(self.ptr);
     }
 
     pub fn newVar(self: Solver) Var {
-        return self.newVarFn(self.ptr);
+        return self.vtable.newVarFn(self.ptr);
     }
 
     pub fn addClause(self: Solver, ps: []const Lit) anyerror!bool {
-        return self.addClauseFn(self.ptr, ps);
+        return self.vtable.addClauseFn(self.ptr, ps);
+    }
+
+    pub fn solve(self: Solver) SolverResult {
+        return self.vtable.solveFn(self.ptr);
     }
 };
 
@@ -82,38 +103,6 @@ const VarOrderHeap = std.PriorityQueue(
 );
 
 pub const MiniSAT = struct {
-    const LiteralSet = std.ArrayHashMap(Lit, void, types.LiteralHashContext, false);
-    const VarData = struct {
-        reason: ?*Clause,
-        level: usize,
-    };
-    const Watcher = struct {
-        clause: *Clause,
-        blocker: Lit,
-        inline fn eql(self: Watcher, other: Watcher) bool {
-            return self.clause == other.clause and self.blocker == other.blocker;
-        }
-        inline fn is_deleted(self: Watcher) bool {
-            return self.clause.mark == 1;
-        }
-    };
-    const WatcherHashContext = struct {
-        inline fn hash(self: WatcherHashContext, watcher: Watcher) u64 {
-            _ = self;
-            _ = watcher;
-            return 0;
-        }
-        inline fn eql(self: WatcherHashContext, a: Watcher, b: Watcher) bool {
-            _ = self;
-            return a.eql(b);
-        }
-    };
-    const AnalyzeStackElement = struct {
-        i: i32,
-        lit: Lit,
-    };
-    const Seen = enum { undef, source, removable, failed };
-
     allocator: std.mem.Allocator,
     clauseAllocator: std.heap.ArenaAllocator,
 
@@ -200,6 +189,38 @@ pub const MiniSAT = struct {
     asynch_interrupt: bool,
 
     rand: std.Random,
+
+    const LiteralSet = std.ArrayHashMap(Lit, void, types.LiteralHashContext, false);
+    const VarData = struct {
+        reason: ?*Clause,
+        level: usize,
+    };
+    const Watcher = struct {
+        clause: *Clause,
+        blocker: Lit,
+        inline fn eql(self: Watcher, other: Watcher) bool {
+            return self.clause == other.clause and self.blocker == other.blocker;
+        }
+        inline fn is_deleted(self: Watcher) bool {
+            return self.clause.mark == 1;
+        }
+    };
+    const WatcherHashContext = struct {
+        inline fn hash(self: WatcherHashContext, watcher: Watcher) u64 {
+            _ = self;
+            _ = watcher;
+            return 0;
+        }
+        inline fn eql(self: WatcherHashContext, a: Watcher, b: Watcher) bool {
+            _ = self;
+            return a.eql(b);
+        }
+    };
+    const AnalyzeStackElement = struct {
+        i: i32,
+        lit: Lit,
+    };
+    const Seen = enum { undef, source, removable, failed };
 
     pub fn create(allocator: std.mem.Allocator) !*MiniSAT {
         var self = try allocator.create(MiniSAT);
@@ -303,7 +324,13 @@ pub const MiniSAT = struct {
     }
 
     pub fn solver(self: *MiniSAT) Solver {
-        return Solver.init(self);
+        return Solver.init(
+            self,
+            &deinit,
+            &newVar,
+            &addClause,
+            &solve,
+        );
     }
 
     pub fn deinit(self: *MiniSAT) void {
@@ -336,7 +363,11 @@ pub const MiniSAT = struct {
         self.add_tmp.deinit();
     }
 
-    fn newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
+    fn newVar(self: *MiniSAT) Var {
+        return self._newVar(types.l_Undef, true);
+    }
+
+    fn _newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
         var v: Var = undefined;
         if (self.free_vars.items.len > 0) {
             v = self.free_vars.pop();
@@ -411,7 +442,17 @@ pub const MiniSAT = struct {
         return true;
     }
 
-    fn solve(self: *MiniSAT) Lbool {
+    fn solve(self: *MiniSAT) SolverResult {
+        const result = self._solve();
+        return if (result.eql(types.l_True))
+            SolverResult.sat
+        else if (result.eql(types.l_False))
+            SolverResult.unsat
+        else
+            SolverResult.unknown;
+    }
+
+    fn _solve(self: *MiniSAT) Lbool {
         self.model.clearAndFree();
         self.conflict.clearAndFree();
 

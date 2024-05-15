@@ -92,6 +92,8 @@ pub fn main() !void {
     for (variables) |v| {
         _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
     }
+    const result = solver.solve();
+    debug.print("result: {}\n", .{result});
 
     var map = IntMap(u64, u32).init(gpa);
     defer map.deinit();
