@@ -7,6 +7,12 @@ const Lit = types.Literal;
 const Lbool = types.LiftedBool;
 const OccList = types.OccList;
 
+pub const SolverResult = enum {
+    sat,
+    unsat,
+    unknown,
+};
+
 pub const Solver = struct {
     ptr: *anyopaque,
     deinitFn: *const fn (pointer: *anyopaque) void,
@@ -438,18 +444,29 @@ pub const MiniSAT = struct {
                 luby(self.restart_inc, @floatFromInt(curr_restarts))
             else
                 std.math.pow(f64, self.restart_inc, @floatFromInt(curr_restarts));
-            // TODO:
-            _ = rest_base;
-            // status = self.search(@intCast(self.conflict_budget.?), @intCast(self.propagation_budget.?));
+            status = self.search(rest_base * self.restart_first);
             if (!self.withinBudget()) {
                 break;
             }
             curr_restarts += 1;
         }
 
-        // TODO:
+        if (self.verbosity >= std.log.Level.info) {
+            const stdio_writer = std.io.getStdOut().writer();
+            try stdio_writer.write("===============================================================================\n");
+        }
 
-        unreachable;
+        if (status.eql(types.l_True)) {
+            self.model.resize(self.nVars());
+            for (0..self.nVars()) |i| {
+                self.model.items[i] = self.varValue(i);
+            }
+        } else if (status.eql(types.l_False) and self.conflict.items.len == 0) {
+            self.ok = false;
+        }
+
+        self.cancelUntil(0);
+        return status;
     }
 
     fn search(self: *MiniSAT, nof_conflicts: i32) !Lbool {
@@ -457,6 +474,7 @@ pub const MiniSAT = struct {
             @panic("search() called when not ok");
         }
 
+        var backtrack_level: usize = undefined;
         var conflictC: u64 = 0;
         var learnt_clause = std.ArrayList(Lit).init(self.allocator);
         defer learnt_clause.deinit();
@@ -472,15 +490,108 @@ pub const MiniSAT = struct {
                 }
 
                 learnt_clause.clearRetainingCapacity();
+                self.analyze(confl, &learnt_clause, &backtrack_level);
+                self.cancelUntil(backtrack_level);
 
-                // TODO:
+                if (learnt_clause.items.len == 1) {
+                    self.uncheckedEnqueue(learnt_clause.items[0], null);
+                } else {
+                    const alloc = self.clauseAllocator.allocator();
+                    const c = try alloc.create(Clause);
+                    c.* = try Clause.init(alloc, learnt_clause.items, true, false);
+                    try self.learnts.append(c);
+                    try self.attachClause(c);
+                    self.claBumpActivity(c);
+                    self.uncheckedEnqueue(learnt_clause.items[0], c);
+                }
 
-            } else {}
+                self.varDecayActivity();
+                self.claDecayActivity();
+
+                if (self.learntsize_adjust_cnt == 1) {
+                    self.learntsize_adjust_confl *= self.learntsize_adjust_inc;
+                    self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
+                    self.max_learnts *= self.learntsize_inc;
+
+                    if (self.verbosity >= std.log.Level.info) {
+                        const stdio_writer = std.io.getStdOut().writer();
+                        try stdio_writer.write(
+                            \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0f} | {:6.3f} % |
+                            \\
+                        ,
+                            self.conflicts,
+
+                            self.dec_vars - if (self.trail_lim.items.len == 0)
+                                self.trail.items.len
+                            else
+                                self.trail_lim.items[0],
+
+                            self.num_clauses,
+                            self.clauses_literals,
+                            self.max_learnts,
+
+                            self.num_learnts,
+                            @as(f64, @floatFromInt(self.learnt_literals)) / self.num_learnts,
+
+                            self.progressEstimate() * 100,
+                        );
+                    }
+                } else {
+                    self.learntsize_adjust_cnt -= 1;
+                }
+            } else {
+                if ((nof_conflicts >= 0 and conflictC >= nof_conflicts) or !self.withinBudget()) {
+                    self.progress_estimate = self.progressEstimate();
+                    self.cancelUntil(0);
+                    return types.l_Undef;
+                }
+
+                if (self.decisionLevel() == 0 and !(try self.simplify())) {
+                    return types.l_False;
+                }
+
+                if (self.learnts.items.len - self.nAssigns() >= self.max_learnts) {
+                    self.reduceDB();
+                }
+
+                var next: ?Lit = null;
+                while (self.decisionLevel() < self.assumptions.items.len) {
+                    const p = self.assumptions.items[self.decisionLevel()];
+                    if (self.litValue(p).eql(types.l_True)) {
+                        self.newDecisionLevel();
+                    } else if (self.litValue(p).eql(types.l_False)) {
+                        self.analyzeFinal(p.neg(), self.conflict);
+                        return types.l_False;
+                    } else {
+                        next = p;
+                        break;
+                    }
+                }
+
+                if (next == null) {
+                    // New variable decision:
+                    self.decisions += 1;
+                    next = self.pickBranchLit();
+                    if (next == null) {
+                        return types.l_True;
+                    }
+                }
+
+                self.newDecisionLevel();
+                self.uncheckedEnqueue(next);
+            }
         }
+    }
 
-        // TODO:
-        _ = nof_conflicts;
-        unreachable;
+    fn progressEstimate(self: MiniSAT) f64 {
+        var progress: f64 = 0;
+        const F: f64 = 1.0 / @as(f64, @floatFromInt(self.nVars()));
+        for (0..self.decisionLevel()) |i| {
+            const beg = if (i == 0) 0 else self.trail_lim.items[i - 1];
+            const end = if (i == self.decisionLevel()) self.trail.items.len else self.trail_lim.items[i];
+            progress += std.math.pow(F, i) * (end - beg);
+        }
+        return progress / self.nVars();
     }
 
     fn releaseVar(self: *MiniSAT, l: Lit) void {
@@ -541,7 +652,7 @@ pub const MiniSAT = struct {
         return true;
     }
 
-    fn analyze(self: *MiniSAT, _conflict: *Clause, out_learnt: *std.ArrayList(Lit), out_btlevel: *i32) !void {
+    fn analyze(self: *MiniSAT, _conflict: *Clause, out_learnt: *std.ArrayList(Lit), out_btlevel: *usize) !void {
         var pathC: i32 = 0;
         var p: ?Lit = null;
         var index: usize = self.trail.items.len - 1;
@@ -689,6 +800,40 @@ pub const MiniSAT = struct {
         }
 
         return true;
+    }
+
+    fn analyzeFinal(self: *MiniSAT, p: Lit, out_conflict: *LiteralSet) !void {
+        out_conflict.clearAndFree();
+        try out_conflict.put(p, {});
+
+        if (self.decisionLevel() == 0) {
+            return;
+        }
+
+        self.seen.put(p.variable(), .source);
+
+        for (self.trail_lim.items[0]..self.trail.items.len) |i| {
+            const i_rev = self.trail.items.len - 1 + self.trail_lim.items[0] - i;
+            const x = self.trail.items[i_rev].variable();
+            if (self.seen.get(x).? != .undef) {
+                if (self.reason(x) != null) {
+                    if (self.level(x) <= 0) {
+                        @panic("level must be > 0");
+                    }
+                    try out_conflict.put(self.trail.items[i_rev].neg(), {});
+                } else {
+                    const c = self.reason(x).?;
+                    for (1..c.header.size) |j| {
+                        if (self.level(c.get(j).variable()) > 0) {
+                            try self.seen.put(c.get(j).variable(), .source);
+                        }
+                    }
+                }
+                try self.seen.put(x, .undef);
+            }
+        }
+
+        try self.seen.put(p.variable(), .undef);
     }
 
     fn uncheckedEnqueue(self: *MiniSAT, p: Lit, from: ?*Clause) void {
@@ -839,6 +984,72 @@ pub const MiniSAT = struct {
             }
         }
         return false;
+    }
+
+    fn cancelUntil(self: *MiniSAT, until_level: usize) !void {
+        if (self.decisionLevel() > until_level) {
+            var c = self.trail.items.len - 1;
+            while (c >= self.trail_lim.items[until_level]) : (c -= 1) {
+                const x = self.trail.items[c].variable();
+                try self.assigns.put(x, types.l_Undef);
+                if (self.phase_saving == .limited or (self.phase_saving == .limited and c > self.trail_lim.items[self.trail_lim.items.len - 1])) {
+                    try self.polarity.put(x, self.trail.items[c].sign());
+                }
+                self.insertVarOrder(x);
+                if (c == self.trail_lim.items[until_level]) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn pickBranchLit(self: *MiniSAT) ?Lit {
+        var next: ?Var = null;
+
+        if (self.rand.float(f64) < self.random_var_freq and self.order_heap.items.len != 0) {
+            next = self.order_heap.items[@intFromFloat(self.rand.float(f64) * self.nVars())];
+            if (self.varValue(next).eql(types.l_Undef) and self.decision.get(next).?) {
+                self.rnd_decisions += 1;
+            }
+        }
+
+        while (next == null or self.varValue(next.?) != types.l_Undef or !self.decision.get(next.?).?) {
+            if (self.order_heap.len == 0) {
+                next = null;
+                break;
+            } else {
+                next = self.order_heap.remove();
+            }
+        }
+
+        if (next) |next_var| {
+            const next_pol = self.user_pol.get(next_var).?;
+            if (next_pol.neq(types.l_Undef)) {
+                return Lit.init(next_var, next_pol.eql(types.l_True));
+            } else if (self.rnd_pol) {
+                return Lit.init(next_var, self.rand.float(f64) < 0.5);
+            } else {
+                return Lit.init(next_var, self.polarity.get(next_var).?);
+            }
+        } else {
+            return null;
+        }
+    }
+
+    fn reduceDB(self: *MiniSAT) void {
+        const extra_lim: f64 = self.cla_inc - @as(f64, @floatFromInt(self.learnts.items.len));
+        std.mem.sort(self.learnts.items, {}, Clause.activityLessThan);
+
+        var j: usize = 0;
+        for (self.learnts.items, 0..) |c, i| {
+            if (c.header.size > 2 and !self.locked(c) and (i < self.learnts.items.len / 2 or c.activity() < extra_lim)) {
+                self.removeClause(c);
+            } else {
+                self.learnts.items[j] = c;
+                j += 1;
+            }
+        }
+        self.learnts.shrinkAndFree(self.learnts.items.len - j);
     }
 
     fn removeSatisfied(self: *MiniSAT, clauses: []*Clause) void {

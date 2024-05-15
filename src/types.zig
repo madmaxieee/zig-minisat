@@ -257,6 +257,13 @@ pub const Clause = struct {
     pub fn is_deleted(self: *Clause) bool {
         return self.header.mark == 1;
     }
+
+    pub fn activityLessThan(context: void, a: *Clause, b: *Clause) bool {
+        _ = context;
+        const activity_a: f32 = a.activity() catch @panic("Clause has no activity");
+        const activity_b: f32 = b.activity() catch @panic("Clause has no activity");
+        return a.header.size > 2 and (b.header.size == 2 or activity_a < activity_b);
+    }
 };
 
 test "Clause" {
