@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const util = @import("util.zig");
 const types = @import("types.zig");
 const Var = types.Variable;
 const Clause = types.Clause;
@@ -21,7 +22,7 @@ pub const Solver = struct {
         deinitFn: *const fn (pointer: *anyopaque) void,
         newVarFn: *const fn (pointer: *anyopaque) Var,
         addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
-        solveFn: *const fn (pointer: *anyopaque) SolverResult,
+        solveFn: *const fn (pointer: *anyopaque) anyerror!SolverResult,
     };
 
     fn init(
@@ -29,7 +30,7 @@ pub const Solver = struct {
         comptime deinitFn: *const fn (pointer: @TypeOf(ptr)) void,
         comptime newVarFn: *const fn (pointer: @TypeOf(ptr)) Var,
         comptime addClauseFn: *const fn (pointer: @TypeOf(ptr), ps: []const Lit) anyerror!bool,
-        comptime solveFn: *const fn (pointer: @TypeOf(ptr)) SolverResult,
+        comptime solveFn: *const fn (pointer: @TypeOf(ptr)) anyerror!SolverResult,
     ) Solver {
         const T = @TypeOf(ptr);
         const vtable = struct {
@@ -45,7 +46,7 @@ pub const Solver = struct {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return addClauseFn(self, ps);
             }
-            pub fn solve(pointer: *anyopaque) SolverResult {
+            pub fn solve(pointer: *anyopaque) anyerror!SolverResult {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return solveFn(self);
             }
@@ -73,7 +74,7 @@ pub const Solver = struct {
         return self.vtable.addClauseFn(self.ptr, ps);
     }
 
-    pub fn solve(self: Solver) SolverResult {
+    pub fn solve(self: Solver) anyerror!SolverResult {
         return self.vtable.solveFn(self.ptr);
     }
 };
@@ -126,7 +127,7 @@ pub const MiniSAT = struct {
     learntsize_factor: f64,
     learntsize_inc: f64,
 
-    learntsize_adjust_start_confl: i32,
+    learntsize_adjust_start_confl: f64,
     learntsize_adjust_inc: f64,
 
     solves: u64,
@@ -147,8 +148,8 @@ pub const MiniSAT = struct {
     clauses: std.ArrayList(*Clause),
     learnts: std.ArrayList(*Clause),
     trail: std.ArrayList(Lit),
-    trail_lim: std.ArrayList(i32),
-    assumptions: std.ArrayList(Lbool),
+    trail_lim: std.ArrayList(usize),
+    assumptions: std.ArrayList(Lit),
 
     activity: VariableMap(f64),
     assigns: VariableMap(Lbool),
@@ -217,7 +218,7 @@ pub const MiniSAT = struct {
         }
     };
     const AnalyzeStackElement = struct {
-        i: i32,
+        i: usize,
         lit: Lit,
     };
     const Seen = enum { undef, source, removable, failed };
@@ -276,8 +277,8 @@ pub const MiniSAT = struct {
             .clauses = std.ArrayList(*Clause).init(allocator),
             .learnts = std.ArrayList(*Clause).init(allocator),
             .trail = std.ArrayList(Lit).init(allocator),
-            .trail_lim = std.ArrayList(i32).init(allocator),
-            .assumptions = std.ArrayList(Lbool).init(allocator),
+            .trail_lim = std.ArrayList(usize).init(allocator),
+            .assumptions = std.ArrayList(Lit).init(allocator),
 
             .activity = VariableMap(f64).init(allocator),
             .assigns = VariableMap(Lbool).init(allocator),
@@ -286,9 +287,7 @@ pub const MiniSAT = struct {
             .decision = VariableMap(bool).init(allocator),
             .vardata = VariableMap(VarData).init(allocator),
             .watches = OccList(Lit, std.ArrayList(Watcher), types.LiteralHashContext).init(allocator),
-            .order_heap = VarOrderHeap.init(allocator, VarOrderHeapContext{
-                .activity = &self.activity,
-            }),
+            .order_heap = VarOrderHeap.init(allocator, VarOrderHeapContext{ .activity = &self.activity }),
 
             .ok = true,
             .cla_inc = 1,
@@ -404,21 +403,21 @@ pub const MiniSAT = struct {
             return true;
         }
 
-        removeSatisfied(self.learnts.items);
+        try self.removeSatisfied(&self.learnts);
 
         if (self.remove_satisfied) {
-            removeSatisfied(self.clauses.items);
+            try self.removeSatisfied(&self.clauses);
 
             for (self.released_vars.items) |v| {
                 if (self.seen.get(v) != .undef) {
                     @panic("seen must be false");
                 }
-                self.seen.put(v, .source);
+                try self.seen.put(v, .source);
             }
 
             var j: usize = 0;
             for (self.trail.items) |lit| {
-                if (!self.seen.get(lit.variable())) {
+                if (self.seen.get(lit.variable()).? != .undef) {
                     self.trail.items[j] = lit;
                     j += 1;
                 }
@@ -427,14 +426,14 @@ pub const MiniSAT = struct {
             self.qhead = self.trail.items.len;
 
             for (self.released_vars.items) |v| {
-                self.seen.put(v, .undef);
+                try self.seen.put(v, .undef);
             }
 
-            self.free_vars.append(self.released_vars.items);
+            try self.free_vars.appendSlice(self.released_vars.items);
             self.released_vars.clearRetainingCapacity();
         }
 
-        self.rebuildOrderHeap();
+        try self.rebuildOrderHeap();
 
         self.simpDB_assigns = self.nAssigns();
         self.simpDB_props = self.clauses_literals + self.learnt_literals;
@@ -442,8 +441,8 @@ pub const MiniSAT = struct {
         return true;
     }
 
-    fn solve(self: *MiniSAT) SolverResult {
-        const result = self._solve();
+    fn solve(self: *MiniSAT) !SolverResult {
+        const result = try self._solve();
         return if (result.eql(types.l_True))
             SolverResult.sat
         else if (result.eql(types.l_False))
@@ -452,7 +451,7 @@ pub const MiniSAT = struct {
             SolverResult.unknown;
     }
 
-    fn _solve(self: *MiniSAT) Lbool {
+    fn _solve(self: *MiniSAT) !Lbool {
         self.model.clearAndFree();
         self.conflict.clearAndFree();
 
@@ -462,15 +461,18 @@ pub const MiniSAT = struct {
 
         self.solves += 1;
 
-        self.max_learnts = @max(self.num_clauses * self.learntsize_factor, self.min_learnts_lim);
+        self.max_learnts = @max(
+            @as(f64, @floatFromInt(self.num_clauses)) * self.learntsize_factor,
+            @as(f64, @floatFromInt(self.min_learnts_lim)),
+        );
 
         self.learntsize_adjust_confl = self.learntsize_adjust_start_confl;
         self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
         var status: Lbool = types.l_Undef;
 
-        if (self.verbosity >= std.log.Level.info) {
+        {
             const stdio_writer = std.io.getStdOut().writer();
-            try stdio_writer.write(
+            try stdio_writer.writeAll(
                 \\============================[ Search Statistics ]==============================
                 \\| Conflicts |          ORIGINAL         |          LEARNT          | Progress |
                 \\|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |
@@ -479,34 +481,34 @@ pub const MiniSAT = struct {
             );
         }
 
-        var curr_restarts: u32 = 0;
+        var curr_restarts: usize = 0;
         while (status.eql(types.l_Undef)) {
             const rest_base = if (self.luby_restart)
-                luby(self.restart_inc, @floatFromInt(curr_restarts))
+                luby(self.restart_inc, curr_restarts)
             else
                 std.math.pow(f64, self.restart_inc, @floatFromInt(curr_restarts));
-            status = self.search(rest_base * self.restart_first);
+            status = try self.search(@intFromFloat(rest_base * @as(f64, @floatFromInt(self.restart_first))));
             if (!self.withinBudget()) {
                 break;
             }
             curr_restarts += 1;
         }
 
-        if (self.verbosity >= std.log.Level.info) {
+        {
             const stdio_writer = std.io.getStdOut().writer();
-            try stdio_writer.write("===============================================================================\n");
+            try stdio_writer.writeAll("===============================================================================\n");
         }
 
         if (status.eql(types.l_True)) {
-            self.model.resize(self.nVars());
+            try self.model.resize(self.nVars());
             for (0..self.nVars()) |i| {
-                self.model.items[i] = self.varValue(i);
+                self.model.items[i] = self.varValue(@intCast(i));
             }
-        } else if (status.eql(types.l_False) and self.conflict.items.len == 0) {
+        } else if (status.eql(types.l_False) and self.conflict.count() == 0) {
             self.ok = false;
         }
 
-        self.cancelUntil(0);
+        try self.cancelUntil(0);
         return status;
     }
 
@@ -523,7 +525,7 @@ pub const MiniSAT = struct {
 
         while (true) {
             const confl = try self.propagate();
-            if (confl != null) {
+            if (confl) |conflict| {
                 self.conflicts += 1;
                 conflictC += 1;
                 if (self.decisionLevel() == 0) {
@@ -531,8 +533,8 @@ pub const MiniSAT = struct {
                 }
 
                 learnt_clause.clearRetainingCapacity();
-                self.analyze(confl, &learnt_clause, &backtrack_level);
-                self.cancelUntil(backtrack_level);
+                try self.analyze(conflict, &learnt_clause, &backtrack_level);
+                try self.cancelUntil(backtrack_level);
 
                 if (learnt_clause.items.len == 1) {
                     self.uncheckedEnqueue(learnt_clause.items[0], null);
@@ -553,13 +555,12 @@ pub const MiniSAT = struct {
                     self.learntsize_adjust_confl *= self.learntsize_adjust_inc;
                     self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
                     self.max_learnts *= self.learntsize_inc;
-
-                    if (self.verbosity >= std.log.Level.info) {
+                    {
                         const stdio_writer = std.io.getStdOut().writer();
-                        try stdio_writer.write(
-                            \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0f} | {:6.3f} % |
+                        try stdio_writer.print(
+                            \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0} | {:6.3} % |
                             \\
-                        ,
+                        , .{
                             self.conflicts,
 
                             self.dec_vars - if (self.trail_lim.items.len == 0)
@@ -572,10 +573,10 @@ pub const MiniSAT = struct {
                             self.max_learnts,
 
                             self.num_learnts,
-                            @as(f64, @floatFromInt(self.learnt_literals)) / self.num_learnts,
+                            @as(f64, @floatFromInt(self.learnt_literals)) / @as(f64, @floatFromInt(self.num_learnts)),
 
                             self.progressEstimate() * 100,
-                        );
+                        });
                     }
                 } else {
                     self.learntsize_adjust_cnt -= 1;
@@ -583,7 +584,7 @@ pub const MiniSAT = struct {
             } else {
                 if ((nof_conflicts >= 0 and conflictC >= nof_conflicts) or !self.withinBudget()) {
                     self.progress_estimate = self.progressEstimate();
-                    self.cancelUntil(0);
+                    try self.cancelUntil(0);
                     return types.l_Undef;
                 }
 
@@ -591,17 +592,17 @@ pub const MiniSAT = struct {
                     return types.l_False;
                 }
 
-                if (self.learnts.items.len - self.nAssigns() >= self.max_learnts) {
-                    self.reduceDB();
+                if (@as(f64, @floatFromInt(self.learnts.items.len - self.nAssigns())) >= self.max_learnts) {
+                    try self.reduceDB();
                 }
 
                 var next: ?Lit = null;
                 while (self.decisionLevel() < self.assumptions.items.len) {
                     const p = self.assumptions.items[self.decisionLevel()];
                     if (self.litValue(p).eql(types.l_True)) {
-                        self.newDecisionLevel();
+                        try self.newDecisionLevel();
                     } else if (self.litValue(p).eql(types.l_False)) {
-                        self.analyzeFinal(p.neg(), self.conflict);
+                        try self.analyzeFinal(p.neg(), &self.conflict);
                         return types.l_False;
                     } else {
                         next = p;
@@ -618,8 +619,8 @@ pub const MiniSAT = struct {
                     }
                 }
 
-                self.newDecisionLevel();
-                self.uncheckedEnqueue(next);
+                try self.newDecisionLevel();
+                self.uncheckedEnqueue(next.?, null);
             }
         }
     }
@@ -630,9 +631,9 @@ pub const MiniSAT = struct {
         for (0..self.decisionLevel()) |i| {
             const beg = if (i == 0) 0 else self.trail_lim.items[i - 1];
             const end = if (i == self.decisionLevel()) self.trail.items.len else self.trail_lim.items[i];
-            progress += std.math.pow(F, i) * (end - beg);
+            progress += std.math.pow(f64, F, @floatFromInt(i)) * @as(f64, @floatFromInt(end - beg));
         }
-        return progress / self.nVars();
+        return progress / @as(f64, @floatFromInt(self.trail.items.len));
     }
 
     fn releaseVar(self: *MiniSAT, l: Lit) void {
@@ -706,8 +707,8 @@ pub const MiniSAT = struct {
 
             for ((if (p == null) 0 else 1)..conflict.header.size) |j| {
                 const q = conflict.get(j);
-                if (!self.seen.get(q.variable()).? and self.level(q.variable()) > 0) {
-                    self.varBumpActivity(q.variable());
+                if (self.seen.get(q.variable()).? == .undef and self.level(q.variable()) > 0) {
+                    try self.varBumpActivity(q.variable());
                     try self.seen.put(q.variable(), .source);
                     if (self.level(q.variable()) >= self.decisionLevel()) {
                         pathC += 1;
@@ -717,18 +718,18 @@ pub const MiniSAT = struct {
                 }
             }
 
-            while (!self.seen.get(self.trail.items[index].variable()).?) : (index -= 1) {}
+            while (self.seen.get(self.trail.items[index].variable()).? == .undef) : (index -= 1) {}
 
             p = self.trail.items[index + 1];
-            conflict = self.reason(p.variable());
-            try self.seen.put(p.variable(), .undef);
+            conflict = self.reason(p.?.variable()).?;
+            try self.seen.put(p.?.variable(), .undef);
             pathC -= 1;
 
             if (pathC <= 0) {
                 break;
             }
         }
-        out_learnt.items[0] = p.neg();
+        out_learnt.items[0] = p.?.neg();
 
         std.mem.copyBackwards(Lit, self.analyze_toclear.items, out_learnt.items);
 
@@ -737,7 +738,7 @@ pub const MiniSAT = struct {
         switch (self.ccmin_mode) {
             .deep => {
                 for (out_learnt.items) |l| {
-                    if (self.reason(l.variable()) == null or !self.litRedundant(l)) {
+                    if (self.reason(l.variable()) == null or !(try self.litRedundant(l))) {
                         out_learnt.items[j] = l;
                         j += 1;
                     }
@@ -753,7 +754,7 @@ pub const MiniSAT = struct {
                         const c = self.reason(v_learnt).?;
                         for (1..c.header.size) |k| {
                             const v = c.get(k).variable();
-                            if (!self.seen.get(v).? and self.level(v) > 0) {
+                            if (self.seen.get(v).? == .undef and self.level(v) > 0) {
                                 out_learnt.items[j] = l;
                                 j += 1;
                                 break;
@@ -763,7 +764,7 @@ pub const MiniSAT = struct {
                 }
             },
             .none => {
-                j = out_learnt.len;
+                j = out_learnt.items.len;
             },
         }
 
@@ -791,7 +792,8 @@ pub const MiniSAT = struct {
         }
     }
 
-    fn litRedundant(self: MiniSAT, p: Lit) !bool {
+    fn litRedundant(self: *MiniSAT, _p: Lit) !bool {
+        var p = _p;
         if (!(self.seen.get(p.variable()).? == .undef or self.seen.get(p.variable()).? == .source)) {
             @panic("seen must be undef or source");
         }
@@ -810,7 +812,7 @@ pub const MiniSAT = struct {
                     continue;
                 }
                 if (self.reason(l.variable()) == null or self.seen.get(l.variable()).? == .failed) {
-                    self.analyze_stack.append(AnalyzeStackElement{ .i = 0, .lit = p });
+                    try self.analyze_stack.append(AnalyzeStackElement{ .i = 0, .lit = p });
                     for (self.analyze_stack.items) |e| {
                         if (self.seen.get(e.lit.variable()).? == .undef) {
                             try self.seen.put(e.lit.variable(), .failed);
@@ -836,7 +838,7 @@ pub const MiniSAT = struct {
                 p = self.analyze_stack.items[self.analyze_stack.items.len - 1].lit;
                 c = self.reason(p.variable()).?;
 
-                self.analyze_stack.pop();
+                _ = self.analyze_stack.pop();
             }
         }
 
@@ -851,7 +853,7 @@ pub const MiniSAT = struct {
             return;
         }
 
-        self.seen.put(p.variable(), .source);
+        try self.seen.put(p.variable(), .source);
 
         for (self.trail_lim.items[0]..self.trail.items.len) |i| {
             const i_rev = self.trail.items.len - 1 + self.trail_lim.items[0] - i;
@@ -985,19 +987,23 @@ pub const MiniSAT = struct {
         }
     }
 
-    fn detachClause(self: *MiniSAT, c: *Clause, strict: bool) void {
+    fn detachClause(self: *MiniSAT, c: *Clause, strict: bool) !void {
         if (c.header.size <= 1) {
             @panic("detachClause: clause size must be > 1");
         }
 
         if (strict) {
-            self.watches.getPtr(c.get(0).neg()).?
-                .orderedRemove(Watcher{ .clause = c, .blocker = c.get(1) });
-            self.watches.getPtr(c.get(1).neg()).?
-                .orderedRemove(Watcher{ .clause = c, .blocker = c.get(0) });
+            const watchers_0 = self.watches.getPtr(c.get(0).neg()).?;
+            const to_remove_0 = Watcher{ .clause = c, .blocker = c.get(1) };
+            const index_to_remove_0 = util.index_of(Watcher, watchers_0.items, to_remove_0).?;
+            _ = watchers_0.orderedRemove(index_to_remove_0);
+            const watchers_1 = self.watches.getPtr(c.get(1).neg()).?;
+            const to_remove_1 = Watcher{ .clause = c, .blocker = c.get(0) };
+            const index_to_remove_1 = util.index_of(Watcher, watchers_1.items, to_remove_1).?;
+            _ = watchers_1.orderedRemove(index_to_remove_1);
         } else {
-            self.watches.smudge(c.get(0).neg());
-            self.watches.smudge(c.get(1).neg());
+            try self.watches.smudge(c.get(0).neg());
+            try self.watches.smudge(c.get(1).neg());
         }
 
         if (c.header.learnt) {
@@ -1009,10 +1015,10 @@ pub const MiniSAT = struct {
         }
     }
 
-    fn removeClause(self: *MiniSAT, c: *Clause) void {
-        self.detachClause(c, true);
+    fn removeClause(self: *MiniSAT, c: *Clause) !void {
+        try self.detachClause(c, true);
         if (self.locked(c)) {
-            self.vardata.get(c.get(0).variable()).?.reason = null;
+            self.vardata.getPtr(c.get(0).variable()).?.reason = null;
         }
         c.mark(1);
         self.clauseAllocator.allocator().destroy(c);
@@ -1036,7 +1042,7 @@ pub const MiniSAT = struct {
                 if (self.phase_saving == .limited or (self.phase_saving == .limited and c > self.trail_lim.items[self.trail_lim.items.len - 1])) {
                     try self.polarity.put(x, self.trail.items[c].sign());
                 }
-                self.insertVarOrder(x);
+                try self.insertVarOrder(x);
                 if (c == self.trail_lim.items[until_level]) {
                     break;
                 }
@@ -1048,13 +1054,16 @@ pub const MiniSAT = struct {
         var next: ?Var = null;
 
         if (self.rand.float(f64) < self.random_var_freq and self.order_heap.items.len != 0) {
-            next = self.order_heap.items[@intFromFloat(self.rand.float(f64) * self.nVars())];
-            if (self.varValue(next).eql(types.l_Undef) and self.decision.get(next).?) {
+            next = self.order_heap.items[
+                @intFromFloat(self.rand.float(f64) *
+                    @as(f64, @floatFromInt(self.nVars())))
+            ];
+            if (self.varValue(next.?).eql(types.l_Undef) and self.decision.get(next.?).?) {
                 self.rnd_decisions += 1;
             }
         }
 
-        while (next == null or self.varValue(next.?) != types.l_Undef or !self.decision.get(next.?).?) {
+        while (next == null or self.varValue(next.?).neq(types.l_Undef) or !self.decision.get(next.?).?) {
             if (self.order_heap.len == 0) {
                 next = null;
                 break;
@@ -1077,14 +1086,14 @@ pub const MiniSAT = struct {
         }
     }
 
-    fn reduceDB(self: *MiniSAT) void {
+    fn reduceDB(self: *MiniSAT) !void {
         const extra_lim: f64 = self.cla_inc - @as(f64, @floatFromInt(self.learnts.items.len));
-        std.mem.sort(self.learnts.items, {}, Clause.activityLessThan);
+        std.mem.sort(*Clause, self.learnts.items, {}, Clause.activityLessThan);
 
         var j: usize = 0;
         for (self.learnts.items, 0..) |c, i| {
             if (c.header.size > 2 and !self.locked(c) and (i < self.learnts.items.len / 2 or c.activity() < extra_lim)) {
-                self.removeClause(c);
+                try self.removeClause(c);
             } else {
                 self.learnts.items[j] = c;
                 j += 1;
@@ -1093,12 +1102,11 @@ pub const MiniSAT = struct {
         self.learnts.shrinkAndFree(self.learnts.items.len - j);
     }
 
-    fn removeSatisfied(self: *MiniSAT, clauses: []*Clause) void {
+    fn removeSatisfied(self: *MiniSAT, clauses: *std.ArrayList(*Clause)) !void {
         var j: usize = 0;
-        for (clauses) |i| {
-            const c = clauses[i];
+        for (clauses.items) |c| {
             if (self.satisfied(c)) {
-                self.removeClause(c);
+                try self.removeClause(c);
             } else {
                 if (self.litValue(c.get(0)).neq(types.l_Undef) or
                     self.litValue(c.get(1)).neq(types.l_Undef))
@@ -1113,22 +1121,30 @@ pub const MiniSAT = struct {
                         c.pop();
                     }
                 }
-                clauses[j] = c;
+                clauses.items[j] = c;
                 j += 1;
             }
         }
-        clauses.shrinkAndFree(clauses.len - j);
+        clauses.shrinkAndFree(clauses.items.len - j);
     }
 
-    fn rebuildOrderHeap(self: *MiniSAT) void {
+    fn rebuildOrderHeap(self: *MiniSAT) !void {
         var heap_vars = std.ArrayList(Var).init(self.allocator);
-        var v: Var = 0;
-        while (v < self.nVars()) : (v += 1) {
-            if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
-                heap_vars.append(v);
+        {
+            var v: Var = 0;
+            while (v < self.nVars()) : (v += 1) {
+                if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
+                    try heap_vars.append(v);
+                }
             }
         }
-        self.order_heap.fromOwnedSlice(self.allocator, self.activity.items);
+
+        self.order_heap.deinit();
+        self.order_heap = VarOrderHeap.fromOwnedSlice(
+            self.allocator,
+            heap_vars.items,
+            VarOrderHeapContext{ .activity = &self.activity },
+        );
     }
 
     inline fn reason(self: MiniSAT, x: Var) ?*Clause {
@@ -1139,14 +1155,14 @@ pub const MiniSAT = struct {
         return self.vardata.get(x).?.level;
     }
 
-    fn insertVarOrder(self: MiniSAT, v: Var) void {
-        if (!self.inOrderHeap(v) and self.decision.get(v)) {
-            self.order_heap.insert(v);
+    fn insertVarOrder(self: *MiniSAT, v: Var) !void {
+        if (!self.inOrderHeap(v) and self.decision.get(v).?) {
+            try self.order_heap.add(v);
         }
     }
 
     fn inOrderHeap(self: MiniSAT, v: Var) bool {
-        for (self.order_heap) |x| {
+        for (self.order_heap.items) |x| {
             if (x == v) {
                 return true;
             }
@@ -1158,17 +1174,17 @@ pub const MiniSAT = struct {
         self.var_inc *= 1 / self.var_decay;
     }
 
-    fn varBumpActivity(self: *MiniSAT, v: Var) void {
+    fn varBumpActivity(self: *MiniSAT, v: Var) !void {
         const act: *f64 = self.activity.getPtr(v).?;
         act.* += self.var_inc;
         if (act.* > 1e100) {
-            for (0..self.newVar()) |i| {
-                self.activity.put(@intCast(i), act.* * 1e-100) catch unreachable;
+            for (0..@intCast(self.newVar())) |i| {
+                try self.activity.put(@intCast(i), act.* * 1e-100);
             }
             self.var_inc *= 1e-100;
         }
         if (self.inOrderHeap(v)) {
-            self.order_heap.update(v, v);
+            try self.order_heap.update(v, v);
         }
     }
 
@@ -1177,11 +1193,11 @@ pub const MiniSAT = struct {
     }
 
     fn claBumpActivity(self: *MiniSAT, c: *Clause) void {
-        const act: *f32 = c.activityPtr().?;
-        act.* += self.cla_inc;
-        if (c.activity > 1e20) {
-            for (0..self.learnts.len) |i| {
-                const act_i: *f32 = self.learnts.items[i].activityPtr().?;
+        const act: *f32 = c.activityPtr();
+        act.* += @floatCast(self.cla_inc);
+        if (c.activity() > 1e20) {
+            for (0..self.learnts.items.len) |i| {
+                const act_i: *f32 = self.learnts.items[i].activityPtr();
                 act_i.* *= 1e-20;
             }
             self.cla_inc *= 1e-20;
@@ -1200,12 +1216,12 @@ pub const MiniSAT = struct {
 
     inline fn locked(self: MiniSAT, c: *Clause) bool {
         const var_0 = c.get(0).variable();
-        const val_0 = self.litValue(var_0);
-        return val_0 == types.l_True and self.reason(var_0) == c;
+        const val_0 = self.varValue(var_0);
+        return val_0.eql(types.l_True) and self.reason(var_0) == c;
     }
 
-    inline fn newDecisionLevel(self: *MiniSAT) void {
-        self.trail_lim.append(self.trail.len);
+    inline fn newDecisionLevel(self: *MiniSAT) !void {
+        try self.trail_lim.append(self.trail.items.len);
     }
 
     inline fn decisionLevel(self: MiniSAT) usize {
@@ -1233,11 +1249,11 @@ pub const MiniSAT = struct {
     }
 
     inline fn nAssigns(self: MiniSAT) usize {
-        return self.trail.len;
+        return self.trail.items.len;
     }
 
     inline fn nVars(self: MiniSAT) usize {
-        return self.next_var;
+        return @intCast(self.next_var);
     }
 
     inline fn nFreeVars(self: MiniSAT) usize {
@@ -1289,7 +1305,8 @@ pub const MiniSAT = struct {
 };
 
 /// Find the finite luby subsequence that contains index 'x', and the
-fn luby(y: f64, x: i32) f64 {
+fn luby(y: f64, _x: usize) f64 {
+    var x = _x;
     var size: usize = 1;
     var seq: usize = 0;
     while (size < x + 1) {

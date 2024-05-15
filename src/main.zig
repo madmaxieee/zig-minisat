@@ -7,7 +7,6 @@ const fs = std.fs;
 
 const MiniSAT = @import("solver.zig").MiniSAT;
 const Solver = @import("solver.zig").Solver;
-const IntMap = @import("int_map.zig").IntMap;
 
 const types = @import("types.zig");
 const Lit = types.Literal;
@@ -58,7 +57,7 @@ pub fn main() !void {
     } else if (res.positionals.len == 1) {
         const file_name = res.positionals[0];
         const file = fs.cwd().openFile(file_name, .{}) catch |err| {
-            try stderr.writer().print("error: failed to open file '{s}': {}\n", .{ file_name, err });
+            try stderr.writer().print("error: failed to open file '{s}': {any}\n", .{ file_name, err });
             return;
         };
         reader = file.reader();
@@ -89,14 +88,12 @@ pub fn main() !void {
     for (variables) |v| {
         debug.print("{d} ", .{v});
     }
+    debug.print("\n", .{});
     for (variables) |v| {
         _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
     }
-    const result = solver.solve();
+    const result = try solver.solve();
     debug.print("result: {}\n", .{result});
-
-    var map = IntMap(u64, u32).init(gpa);
-    defer map.deinit();
 }
 
 test {

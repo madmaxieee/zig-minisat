@@ -108,10 +108,7 @@ const ClauseData = union {
     abs: u32,
 };
 
-const ClauseError = error{
-    NoExtraData,
-    LiteralNotFound,
-};
+const ClauseError = error{LiteralNotFound};
 
 pub const Clause = struct {
     header: ClauseHeader,
@@ -136,7 +133,7 @@ pub const Clause = struct {
             if (is_learnt) {
                 clause.data[clause.header.size] = .{ .act = 0 };
             } else {
-                try clause.calcAbstraction();
+                clause.calcAbstraction();
             }
         }
         return clause;
@@ -146,9 +143,9 @@ pub const Clause = struct {
         self.allocator.free(self.data);
     }
 
-    pub fn calcAbstraction(self: *Clause) ClauseError!void {
+    pub fn calcAbstraction(self: *Clause) void {
         if (!self.header.has_extra) {
-            return ClauseError.NoExtraData;
+            @panic("Clause has no extra data");
         }
         var abs: u32 = 0;
         for (0..self.header.size) |i| {
@@ -185,23 +182,23 @@ pub const Clause = struct {
         self.data[i] = .{ .lit = p };
     }
 
-    pub inline fn activity(self: *Clause) ClauseError!f32 {
+    pub inline fn activity(self: *Clause) f32 {
         if (!self.header.has_extra) {
-            return ClauseError.NoExtraData;
+            @panic("Clause has no extra data");
         }
         return self.data[self.header.size].act;
     }
 
-    pub inline fn activityPtr(self: *Clause) ClauseError!*f32 {
+    pub inline fn activityPtr(self: *Clause) *f32 {
         if (!self.header.has_extra) {
-            return ClauseError.NoExtraData;
+            @panic("Clause has no extra data");
         }
         return &self.data[self.header.size].act;
     }
 
-    pub inline fn abstraction(self: *Clause, i: usize) ClauseError!u32 {
+    pub inline fn abstraction(self: *Clause, i: usize) u32 {
         if (!self.header.has_extra) {
-            return ClauseError.NoExtraData;
+            @panic("Clause has no extra data");
         }
         return self.data[i].abs;
     }
@@ -260,8 +257,8 @@ pub const Clause = struct {
 
     pub fn activityLessThan(context: void, a: *Clause, b: *Clause) bool {
         _ = context;
-        const activity_a: f32 = a.activity() catch @panic("Clause has no activity");
-        const activity_b: f32 = b.activity() catch @panic("Clause has no activity");
+        const activity_a: f32 = a.activity();
+        const activity_b: f32 = b.activity();
         return a.header.size > 2 and (b.header.size == 2 or activity_a < activity_b);
     }
 };
@@ -354,10 +351,10 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             self.dirties.clearRetainingCapacity();
         }
 
-        pub fn smudge(self: *Self, key: K) void {
+        pub fn smudge(self: *Self, key: K) !void {
             if (self.dirty.get(key) == false) {
-                self.dirty.put(key, true);
-                self.dirties.push(key);
+                try self.dirty.put(key, true);
+                try self.dirties.append(key);
             }
         }
 
