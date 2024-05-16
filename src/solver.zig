@@ -1320,3 +1320,20 @@ fn luby(y: f64, _x: usize) f64 {
     }
     return std.math.pow(f64, y, @floatFromInt(seq));
 }
+
+test "MiniSAT.newVar" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    var variables = [_]i32{0} ** 5;
+    for (0..5) |i| {
+        variables[i] = solver.newVar();
+    }
+
+    try testing.expect(std.mem.eql(Var, &variables, &[_]Var{ 0, 1, 2, 3, 4 }));
+}
