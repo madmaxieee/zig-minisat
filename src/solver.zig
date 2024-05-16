@@ -110,7 +110,7 @@ pub const MiniSAT = struct {
     model: std.ArrayList(Lbool),
     conflict: LiteralSet,
 
-    verbosity: std.log.Level,
+    verbose: bool,
     var_decay: f64,
     clause_decay: f64,
     random_var_freq: f64,
@@ -239,7 +239,7 @@ pub const MiniSAT = struct {
             .model = std.ArrayList(Lbool).init(allocator),
             .conflict = LiteralSet.init(allocator),
 
-            .verbosity = std.log.Level.info,
+            .verbose = true,
             .var_decay = 0.95,
             .clause_decay = 0.999,
             .random_var_freq = 0,
@@ -470,9 +470,9 @@ pub const MiniSAT = struct {
         self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
         var status: Lbool = types.l_Undef;
 
-        {
-            const stdio_writer = std.io.getStdOut().writer();
-            try stdio_writer.writeAll(
+        if (self.verbose) {
+            const stdout_writer = std.io.getStdOut().writer();
+            try stdout_writer.writeAll(
                 \\============================[ Search Statistics ]==============================
                 \\| Conflicts |          ORIGINAL         |          LEARNT          | Progress |
                 \\|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |
@@ -494,9 +494,9 @@ pub const MiniSAT = struct {
             curr_restarts += 1;
         }
 
-        {
-            const stdio_writer = std.io.getStdOut().writer();
-            try stdio_writer.writeAll("===============================================================================\n");
+        if (self.verbose) {
+            const stdout_writer = std.io.getStdOut().writer();
+            try stdout_writer.writeAll("===============================================================================\n");
         }
 
         if (status.eql(types.l_True)) {
@@ -555,9 +555,9 @@ pub const MiniSAT = struct {
                     self.learntsize_adjust_confl *= self.learntsize_adjust_inc;
                     self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
                     self.max_learnts *= self.learntsize_inc;
-                    {
-                        const stdio_writer = std.io.getStdOut().writer();
-                        try stdio_writer.print(
+                    if (self.verbose) {
+                        const stdout_writer = std.io.getStdOut().writer();
+                        try stdout_writer.print(
                             \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0} | {:6.3} % |
                             \\
                         , .{
