@@ -20,7 +20,7 @@ pub const Solver = struct {
 
     const VTable = struct {
         deinitFn: *const fn (pointer: *anyopaque) void,
-        newVarFn: *const fn (pointer: *anyopaque) Var,
+        newVarFn: *const fn (pointer: *anyopaque) anyerror!Var,
         addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
         solveFn: *const fn (pointer: *anyopaque) anyerror!SolverResult,
     };
@@ -28,7 +28,7 @@ pub const Solver = struct {
     fn init(
         ptr: anytype,
         comptime deinitFn: *const fn (pointer: @TypeOf(ptr)) void,
-        comptime newVarFn: *const fn (pointer: @TypeOf(ptr)) Var,
+        comptime newVarFn: *const fn (pointer: @TypeOf(ptr)) anyerror!Var,
         comptime addClauseFn: *const fn (pointer: @TypeOf(ptr), ps: []const Lit) anyerror!bool,
         comptime solveFn: *const fn (pointer: @TypeOf(ptr)) anyerror!SolverResult,
     ) Solver {
@@ -38,7 +38,7 @@ pub const Solver = struct {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return deinitFn(self);
             }
-            pub fn newVar(pointer: *anyopaque) Var {
+            pub fn newVar(pointer: *anyopaque) anyerror!Var {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return newVarFn(self);
             }
@@ -66,7 +66,7 @@ pub const Solver = struct {
         return self.vtable.deinitFn(self.ptr);
     }
 
-    pub fn newVar(self: Solver) Var {
+    pub fn newVar(self: Solver) anyerror!Var {
         return self.vtable.newVarFn(self.ptr);
     }
 
@@ -165,7 +165,7 @@ pub const MiniSAT = struct {
     var_inc: f64,
     qhead: usize,
     simpDB_assigns: usize,
-    simpDB_props: u64,
+    simpDB_props: i64,
     progress_estimate: f64,
     remove_satisfied: bool,
 
@@ -199,20 +199,20 @@ pub const MiniSAT = struct {
     const Watcher = struct {
         clause: *Clause,
         blocker: Lit,
-        inline fn eql(self: Watcher, other: Watcher) bool {
+        pub inline fn eql(self: Watcher, other: Watcher) bool {
             return self.clause == other.clause and self.blocker == other.blocker;
         }
-        inline fn is_deleted(self: Watcher) bool {
-            return self.clause.mark == 1;
+        pub inline fn is_deleted(self: Watcher) bool {
+            return self.clause.*.header.mark == 1;
         }
     };
     const WatcherHashContext = struct {
-        inline fn hash(self: WatcherHashContext, watcher: Watcher) u64 {
+        pub inline fn hash(self: WatcherHashContext, watcher: Watcher) u64 {
             _ = self;
             _ = watcher;
             return 0;
         }
-        inline fn eql(self: WatcherHashContext, a: Watcher, b: Watcher) bool {
+        pub inline fn eql(self: WatcherHashContext, a: Watcher, b: Watcher) bool {
             _ = self;
             return a.eql(b);
         }
@@ -362,11 +362,11 @@ pub const MiniSAT = struct {
         self.add_tmp.deinit();
     }
 
-    fn newVar(self: *MiniSAT) Var {
-        return self._newVar(types.l_Undef, true);
+    fn newVar(self: *MiniSAT) !Var {
+        return try self._newVar(types.l_Undef, true);
     }
 
-    fn _newVar(self: *MiniSAT, upol: Lbool, dvar: bool) Var {
+    fn _newVar(self: *MiniSAT, upol: Lbool, dvar: bool) !Var {
         var v: Var = undefined;
         if (self.free_vars.items.len > 0) {
             v = self.free_vars.pop();
@@ -375,8 +375,8 @@ pub const MiniSAT = struct {
             self.next_var += 1;
         }
 
-        self.watches.initKey(Lit.init(v, false));
-        self.watches.initKey(Lit.init(v, true));
+        try self.watches.initKey(Lit.init(v, false));
+        try self.watches.initKey(Lit.init(v, true));
         self.assigns.put(v, types.l_Undef) catch unreachable;
         self.vardata.put(v, VarData{ .reason = null, .level = 0 }) catch unreachable;
         self.activity.put(v, if (self.rnd_init_act) self.rand.float(f64) else 0) catch unreachable;
@@ -436,7 +436,7 @@ pub const MiniSAT = struct {
         try self.rebuildOrderHeap();
 
         self.simpDB_assigns = self.nAssigns();
-        self.simpDB_props = self.clauses_literals + self.learnt_literals;
+        self.simpDB_props = @intCast(self.clauses_literals + self.learnt_literals);
 
         return true;
     }
@@ -592,7 +592,7 @@ pub const MiniSAT = struct {
                     return types.l_False;
                 }
 
-                if (@as(f64, @floatFromInt(self.learnts.items.len - self.nAssigns())) >= self.max_learnts) {
+                if (@as(f64, @floatFromInt(self.learnts.items.len)) >= self.max_learnts + @as(f64, @floatFromInt(self.nAssigns()))) {
                     try self.reduceDB();
                 }
 
@@ -645,7 +645,7 @@ pub const MiniSAT = struct {
 
     fn addClause(self: *MiniSAT, ps: []const Lit) !bool {
         if (self.decisionLevel() != 0) {
-            unreachable;
+            @panic("addClause() called when decisionLevel() != 0");
         }
 
         if (!self.ok) {
@@ -662,31 +662,31 @@ pub const MiniSAT = struct {
             types.literalLessThan,
         );
 
-        var _ps = self.add_tmp.items;
-        var count: usize = 0;
-        var p = types.lit_Undef;
-        for (0..self.add_tmp.items.len) |i| {
-            if (self.litValue(_ps[i]).eql(types.l_True) or _ps[i].eql(p.neg())) {
+        const _ps = &self.add_tmp.items;
+        var j: usize = 0;
+        var p: ?Lit = null;
+        for (_ps.*) |p_i| {
+            if (self.litValue(p_i).eql(types.l_True) or (p != null and p_i.eql(p.?.neg()))) {
                 return true;
-            } else if (self.litValue(_ps[i]).neq(types.l_False) and _ps[i].neq(p)) {
-                p = _ps[i];
-                _ps[count] = _ps[i];
-                count += 1;
+            } else if (self.litValue(p_i).neq(types.l_False) and (p != null and p_i.neq(p.?))) {
+                p = p_i;
+                _ps.*[j] = p_i;
+                j += 1;
             }
         }
-        self.add_tmp.shrinkAndFree(self.add_tmp.items.len - count);
+        self.add_tmp.shrinkAndFree(self.add_tmp.items.len - j);
 
-        if (self.add_tmp.items.len == 0) {
+        if (_ps.*.len == 0) {
             self.ok = false;
             return false;
-        } else if (self.add_tmp.items.len == 1) {
-            self.uncheckedEnqueue(_ps[0], null);
+        } else if (_ps.*.len == 1) {
+            self.uncheckedEnqueue(_ps.*[0], null);
             self.ok = try self.propagate() == null;
             return self.ok;
         } else {
             const alloc = self.clauseAllocator.allocator();
             const c = try alloc.create(Clause);
-            c.* = try Clause.init(self.clauseAllocator.allocator(), _ps, false, false);
+            c.* = try Clause.init(self.clauseAllocator.allocator(), _ps.*, false, false);
             try self.clauses.append(c);
             try self.attachClause(c);
         }
@@ -967,7 +967,7 @@ pub const MiniSAT = struct {
             ws.shrinkAndFree(ws.items.len - j);
         }
         self.propagations += num_props;
-        self.simpDB_props -= num_props;
+        self.simpDB_props -= @intCast(num_props);
 
         return conflict;
     }
@@ -1178,7 +1178,7 @@ pub const MiniSAT = struct {
         const act: *f64 = self.activity.getPtr(v).?;
         act.* += self.var_inc;
         if (act.* > 1e100) {
-            for (0..@intCast(self.newVar())) |i| {
+            for (0..self.nVars()) |i| {
                 try self.activity.put(@intCast(i), act.* * 1e-100);
             }
             self.var_inc *= 1e-100;
@@ -1332,8 +1332,31 @@ test "MiniSAT.newVar" {
 
     var variables = [_]i32{0} ** 5;
     for (0..5) |i| {
-        variables[i] = solver.newVar();
+        variables[i] = try solver.newVar();
     }
 
     try testing.expect(std.mem.eql(Var, &variables, &[_]Var{ 0, 1, 2, 3, 4 }));
+}
+
+test "MiniSAT: sat-trivial-01" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+    const num_vars = 10;
+    var variables = [_]i32{0} ** num_vars;
+
+    for (0..num_vars) |i| {
+        variables[i] = try solver.newVar();
+    }
+    for (variables) |v| {
+        _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
+    }
+    const result = try solver.solve();
+
+    try testing.expect(result == .sat);
 }

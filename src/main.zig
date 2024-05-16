@@ -83,7 +83,7 @@ pub fn main() !void {
     const num_vars = 10;
     var variables = [_]i32{0} ** num_vars;
     for (0..num_vars) |i| {
-        variables[i] = solver.newVar();
+        variables[i] = try solver.newVar();
     }
     for (variables) |v| {
         debug.print("{d} ", .{v});

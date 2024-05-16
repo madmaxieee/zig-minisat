@@ -51,9 +51,6 @@ pub const LiteralHashContext = struct {
     }
 };
 
-pub const lit_Undef = Literal{ .x = -2 };
-pub const lit_Error = Literal{ .x = -1 };
-
 test "Literal" {
     const testing = std.testing;
     const var_: Variable = 3;
@@ -315,31 +312,32 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
         }
 
         pub fn lookup(self: *Self, key: K) !?*V {
-            if (self.dirty.get(key) == false) {
-                try self.dirty.put(key, true);
-                try self.dirties.append(key);
+            if (self.dirty.get(key).?) {
+                try self.clean(key);
             }
             return self.occs.getPtr(key);
         }
 
-        pub fn initKey(self: *Self, key: K) void {
-            const vec: ?*V = self.occs.getPtr(key);
-            if (vec) |v| {
-                v.* = V.init(self.allocator);
+        pub fn initKey(self: *Self, key: K) !void {
+            if (self.occs.getPtr(key)) |v| {
+                v.clearAndFree();
+            } else {
+                try self.occs.put(key, V.init(self.allocator));
             }
+            try self.dirty.put(key, false);
         }
 
-        pub fn clean(self: *Self, key: K) void {
+        pub fn clean(self: *Self, key: K) !void {
             const value: *V = self.occs.getPtr(key).?;
             var j: usize = 0;
             for (0..value.items.len) |i| {
-                if (!value[i].is_deleted()) {
-                    self.dirties[j] = self.dirties[i];
+                if (!value.items[i].is_deleted()) {
+                    self.dirties.items[j] = self.dirties.items[i];
                     j += 1;
                 }
             }
             value.shrinkRetainingCapacity(value.items.len - j);
-            self.dirty.put(key, false);
+            try self.dirty.put(key, false);
         }
 
         pub fn cleanAll(self: *Self) void {
