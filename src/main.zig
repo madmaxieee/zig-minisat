@@ -20,6 +20,7 @@ pub fn main() !void {
 
     const paramsConfig =
         \\-h, --help             Display this help and exit.
+        \\-q, --quiet            Suppress all output except the result.
         \\<FILE>                 a plain text DIMCAS file.
         \\
     ;
@@ -33,30 +34,30 @@ pub fn main() !void {
     const stderr = io.getStdErr();
 
     var diag = clap.Diagnostic{};
-    var res = clap.parse(clap.Help, &params, parsers, .{
+    var claps_result = clap.parse(clap.Help, &params, parsers, .{
         .diagnostic = &diag,
         .allocator = gpa,
     }) catch |err| {
         diag.report(stderr.writer(), err) catch {};
         return;
     };
-    defer res.deinit();
+    defer claps_result.deinit();
 
-    if (res.args.help != 0) {
+    if (claps_result.args.help != 0) {
         return clap.help(stderr.writer(), clap.Help, &params, .{});
     }
 
-    if (res.positionals.len > 1) {
-        try stderr.writer().print("error: too many arguments, expected 1, got {d}\n", .{res.positionals.len});
+    if (claps_result.positionals.len > 1) {
+        try stderr.writer().print("error: too many arguments, expected 1, got {d}\n", .{claps_result.positionals.len});
         return;
     }
 
     var reader: fs.File.Reader = undefined;
     // read from stdin if no file is provided
-    if (res.positionals.len == 0) {
+    if (claps_result.positionals.len == 0) {
         reader = io.getStdIn().reader();
-    } else if (res.positionals.len == 1) {
-        const file_name = res.positionals[0];
+    } else if (claps_result.positionals.len == 1) {
+        const file_name = claps_result.positionals[0];
         const file = fs.cwd().openFile(file_name, .{}) catch |err| {
             try stderr.writer().print("error: failed to open file '{s}': {any}\n", .{ file_name, err });
             return;
@@ -67,6 +68,7 @@ pub fn main() !void {
     }
 
     var minisat = try MiniSAT.create(gpa);
+    minisat.verbose = claps_result.args.quiet == 0;
     defer gpa.destroy(minisat);
     var solver: Solver = minisat.solver();
     defer solver.deinit();
