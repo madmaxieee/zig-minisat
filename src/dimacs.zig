@@ -36,12 +36,12 @@ pub const DimcasParser = struct {
         var count: usize = 0;
         while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
             const trimmed_line = std.mem.trim(u8, line, "\n");
+            if (std.mem.eql(u8, trimmed_line, "%")) {
+                break;
+            }
             if (try self.parseComment(trimmed_line)) continue;
             if (header == null) {
                 header = try self.parseHeader(trimmed_line);
-                if (header == null) {
-                    @panic("invalid header");
-                }
             } else {
                 try self.parseClause(trimmed_line);
                 count += 1;
@@ -51,7 +51,7 @@ pub const DimcasParser = struct {
             @panic("no header found");
         }
         if (header.?.num_clauses != count) {
-            @panic("invalid clause count");
+            @panic("clause count mismatch");
         }
     }
 
@@ -66,32 +66,42 @@ pub const DimcasParser = struct {
         return false;
     }
 
-    fn parseHeader(self: DimcasParser, line: []const u8) !?DimacsHeader {
+    fn parseHeader(self: DimcasParser, line: []const u8) !DimacsHeader {
         _ = self;
         var header = DimacsHeader{
             .num_variables = undefined,
             .num_clauses = undefined,
         };
         var it = std.mem.split(u8, line, " ");
-        if (it.next()) |first_tok| {
+        var tok: ?[]const u8 = it.next();
+        while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
+        if (tok) |first_tok| {
             if (!std.mem.eql(u8, first_tok, "p")) {
-                return null;
+                @panic("expected 'p' token in header");
             }
         }
-        if (it.next()) |second_tok| {
+        tok = it.next();
+        while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
+        if (tok) |second_tok| {
             if (!std.mem.eql(u8, second_tok, "cnf")) {
-                return null;
+                @panic("expected 'cnf' token in header");
             }
         }
-        if (it.next()) |third_tok| {
+        tok = it.next();
+        while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
+        if (tok) |third_tok| {
             const num_variables = std.fmt.parseInt(usize, third_tok, 10) catch @panic("invalid variable count");
             header.num_variables = num_variables;
         }
-        if (it.next()) |fourth_tok| {
+        tok = it.next();
+        while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
+        if (tok) |fourth_tok| {
             const num_clauses = std.fmt.parseInt(usize, fourth_tok, 10) catch @panic("invalid clause count");
             header.num_clauses = num_clauses;
         }
-        if (it.next()) |_| {
+        tok = it.next();
+        while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
+        if (tok) |_| {
             @panic("unexpected token in header");
         }
         return header;
@@ -101,6 +111,9 @@ pub const DimcasParser = struct {
         self.literals.clearRetainingCapacity();
         var it = std.mem.split(u8, line, " ");
         while (it.next()) |tok| {
+            if (tok.len == 0) {
+                continue;
+            }
             const raw_var = try std.fmt.parseInt(types.Variable, tok, 10);
             if (raw_var == 0) {
                 break;
