@@ -21,6 +21,7 @@ pub const Solver = struct {
     const VTable = struct {
         deinitFn: *const fn (pointer: *anyopaque) void,
         newVarFn: *const fn (pointer: *anyopaque) anyerror!Var,
+        nVarsFn: *const fn (pointer: *anyopaque) usize,
         addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
         solveFn: *const fn (pointer: *anyopaque) anyerror!SolverResult,
     };
@@ -29,6 +30,7 @@ pub const Solver = struct {
         ptr: anytype,
         comptime deinitFn: *const fn (pointer: @TypeOf(ptr)) void,
         comptime newVarFn: *const fn (pointer: @TypeOf(ptr)) anyerror!Var,
+        comptime nVarsFn: *const fn (pointer: @TypeOf(ptr)) usize,
         comptime addClauseFn: *const fn (pointer: @TypeOf(ptr), ps: []const Lit) anyerror!bool,
         comptime solveFn: *const fn (pointer: @TypeOf(ptr)) anyerror!SolverResult,
     ) Solver {
@@ -41,6 +43,10 @@ pub const Solver = struct {
             pub fn newVar(pointer: *anyopaque) anyerror!Var {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return newVarFn(self);
+            }
+            pub fn nVars(pointer: *anyopaque) usize {
+                const self: T = @ptrCast(@alignCast(pointer));
+                return nVarsFn(self);
             }
             pub fn addClause(pointer: *anyopaque, ps: []const Lit) anyerror!bool {
                 const self: T = @ptrCast(@alignCast(pointer));
@@ -56,6 +62,7 @@ pub const Solver = struct {
             .vtable = .{
                 .deinitFn = vtable.deinit,
                 .newVarFn = vtable.newVar,
+                .nVarsFn = vtable.nVars,
                 .addClauseFn = vtable.addClause,
                 .solveFn = vtable.solve,
             },
@@ -68,6 +75,10 @@ pub const Solver = struct {
 
     pub fn newVar(self: Solver) anyerror!Var {
         return self.vtable.newVarFn(self.ptr);
+    }
+
+    pub fn nVars(self: Solver) usize {
+        return self.vtable.nVarsFn(self.ptr);
     }
 
     pub fn addClause(self: Solver, ps: []const Lit) anyerror!bool {
@@ -234,7 +245,7 @@ pub const MiniSAT = struct {
 
         self.* = MiniSAT{
             .allocator = allocator,
-            .clauseAllocator = std.heap.ArenaAllocator.init(allocator),
+            .clauseAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 
             .model = std.ArrayList(Lbool).init(allocator),
             .conflict = LiteralSet.init(allocator),
@@ -327,12 +338,15 @@ pub const MiniSAT = struct {
             self,
             &deinit,
             &newVar,
+            &nVars,
             &addClause,
             &solve,
         );
     }
 
     pub fn deinit(self: *MiniSAT) void {
+        self.clauseAllocator.deinit();
+
         self.model.deinit();
         self.conflict.deinit();
 
@@ -349,10 +363,7 @@ pub const MiniSAT = struct {
         self.decision.deinit();
         self.vardata.deinit();
         self.watches.deinit();
-
         self.order_heap.deinit();
-
-        self.clauseAllocator.deinit();
 
         self.released_vars.deinit();
         self.free_vars.deinit();
@@ -500,8 +511,8 @@ pub const MiniSAT = struct {
         }
 
         if (status.eql(types.l_True)) {
-            try self.model.resize(self.nVars());
-            for (0..self.nVars()) |i| {
+            try self.model.resize(self._nVars());
+            for (0..self._nVars()) |i| {
                 self.model.items[i] = self.varValue(@intCast(i));
             }
         } else if (status.eql(types.l_False) and self.conflict.count() == 0) {
@@ -627,7 +638,7 @@ pub const MiniSAT = struct {
 
     fn progressEstimate(self: MiniSAT) f64 {
         var progress: f64 = 0;
-        const F: f64 = 1.0 / @as(f64, @floatFromInt(self.nVars()));
+        const F: f64 = 1.0 / @as(f64, @floatFromInt(self._nVars()));
         for (0..self.decisionLevel()) |i| {
             const beg = if (i == 0) 0 else self.trail_lim.items[i - 1];
             const end = if (i == self.decisionLevel()) self.trail.items.len else self.trail_lim.items[i];
@@ -1056,7 +1067,7 @@ pub const MiniSAT = struct {
         if (self.rand.float(f64) < self.random_var_freq and self.order_heap.items.len != 0) {
             next = self.order_heap.items[
                 @intFromFloat(self.rand.float(f64) *
-                    @as(f64, @floatFromInt(self.nVars())))
+                    @as(f64, @floatFromInt(self._nVars())))
             ];
             if (self.varValue(next.?).eql(types.l_Undef) and self.decision.get(next.?).?) {
                 self.rnd_decisions += 1;
@@ -1132,7 +1143,7 @@ pub const MiniSAT = struct {
         var heap_vars = std.ArrayList(Var).init(self.allocator);
         {
             var v: Var = 0;
-            while (v < self.nVars()) : (v += 1) {
+            while (v < self._nVars()) : (v += 1) {
                 if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
                     try heap_vars.append(v);
                 }
@@ -1178,7 +1189,7 @@ pub const MiniSAT = struct {
         const act: *f64 = self.activity.getPtr(v).?;
         act.* += self.var_inc;
         if (act.* > 1e100) {
-            for (0..self.nVars()) |i| {
+            for (0..self._nVars()) |i| {
                 try self.activity.put(@intCast(i), act.* * 1e-100);
             }
             self.var_inc *= 1e-100;
@@ -1252,7 +1263,11 @@ pub const MiniSAT = struct {
         return self.trail.items.len;
     }
 
-    inline fn nVars(self: MiniSAT) usize {
+    pub fn nVars(self: *MiniSAT) usize {
+        return @intCast(self.next_var);
+    }
+
+    inline fn _nVars(self: MiniSAT) usize {
         return @intCast(self.next_var);
     }
 

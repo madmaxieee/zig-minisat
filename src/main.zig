@@ -7,6 +7,7 @@ const fs = std.fs;
 
 const MiniSAT = @import("solver.zig").MiniSAT;
 const Solver = @import("solver.zig").Solver;
+const DimacsParser = @import("dimacs.zig").DimcasParser;
 
 const types = @import("types.zig");
 const Lit = types.Literal;
@@ -65,33 +66,15 @@ pub fn main() !void {
         unreachable;
     }
 
-    // read the file and print it to stdout
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const read = try reader.read(buf[0..]);
-        if (read == 0) {
-            break;
-        }
-        _ = try io.getStdOut().write(buf[0..read]);
-    }
-
     var minisat = try MiniSAT.create(gpa);
     defer gpa.destroy(minisat);
     var solver: Solver = minisat.solver();
     defer solver.deinit();
 
-    const num_vars = 10;
-    var variables = [_]i32{0} ** num_vars;
-    for (0..num_vars) |i| {
-        variables[i] = try solver.newVar();
-    }
-    for (variables) |v| {
-        debug.print("{d} ", .{v});
-    }
-    debug.print("\n", .{});
-    for (variables) |v| {
-        _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
-    }
+    var parser = DimacsParser.init(gpa, &solver);
+    defer parser.deinit();
+    try parser.parse(reader);
+
     const result = try solver.solve();
     debug.print("result: {}\n", .{result});
 }

@@ -302,9 +302,14 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
         }
 
         pub fn deinit(self: *Self) void {
-            self.occs.deinit();
             self.dirty.deinit();
             self.dirties.deinit();
+
+            var it = self.occs.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit();
+            }
+            self.occs.deinit();
         }
 
         pub fn getPtr(self: Self, key: K) ?*V {
