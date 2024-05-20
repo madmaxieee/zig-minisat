@@ -76,7 +76,18 @@ pub fn main() !void {
     try parser.parse(reader);
 
     const result = try solver.solve();
-    debug.print("result: {}\n", .{result});
+    const stdout = io.getStdOut();
+    switch (result) {
+        .sat => {
+            try stdout.writer().writeAll("SATISFIABLE\n");
+        },
+        .unsat => {
+            try stdout.writer().writeAll("UNSATISFIABLE\n");
+        },
+        .unknown => {
+            try stdout.writer().writeAll("UNKNOWN\n");
+        },
+    }
 }
 
 test {
