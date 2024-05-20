@@ -482,8 +482,8 @@ pub const MiniSAT = struct {
         var status: Lbool = types.l_Undef;
 
         if (self.verbose) {
-            const stdout_writer = std.io.getStdOut().writer();
-            try stdout_writer.writeAll(
+            const stderr = std.io.getStdErr().writer();
+            try stderr.writeAll(
                 \\============================[ Search Statistics ]==============================
                 \\| Conflicts |          ORIGINAL         |          LEARNT          | Progress |
                 \\|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |
@@ -506,8 +506,8 @@ pub const MiniSAT = struct {
         }
 
         if (self.verbose) {
-            const stdout_writer = std.io.getStdOut().writer();
-            try stdout_writer.writeAll("===============================================================================\n");
+            const stderr = std.io.getStdErr().writer();
+            try stderr.writeAll("===============================================================================\n");
         }
 
         if (status.eql(types.l_True)) {
@@ -567,8 +567,8 @@ pub const MiniSAT = struct {
                     self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
                     self.max_learnts *= self.learntsize_inc;
                     if (self.verbose) {
-                        const stdout_writer = std.io.getStdOut().writer();
-                        try stdout_writer.print(
+                        const stderr = std.io.getStdErr().writer();
+                        try stderr.print(
                             \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0} | {:6.3} % |
                             \\
                         , .{
