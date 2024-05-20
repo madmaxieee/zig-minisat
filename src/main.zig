@@ -85,7 +85,7 @@ pub fn main() !void {
             try stdout.writer().writeAll("UNSATISFIABLE\n");
         },
         .unknown => {
-            try stdout.writer().writeAll("UNKNOWN\n");
+            try stdout.writer().writeAll("INDETERMINATE\n");
         },
     }
 }
