@@ -8,9 +8,6 @@ const MiniSAT = @import("solver.zig").MiniSAT;
 const Solver = @import("solver.zig").Solver;
 const DimacsParser = @import("dimacs.zig").DimcasParser;
 
-const types = @import("types.zig");
-const Lit = types.Literal;
-
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_impl.deinit();
