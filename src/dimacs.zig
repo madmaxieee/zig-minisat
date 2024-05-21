@@ -114,18 +114,18 @@ pub const DimcasParser = struct {
             if (tok.len == 0) {
                 continue;
             }
-            const raw_var = try std.fmt.parseInt(types.Variable, tok, 10);
+            const raw_var = try std.fmt.parseInt(i32, tok, 10);
             if (raw_var == 0) {
                 break;
             } else if (raw_var < 0) {
-                const variable = -raw_var - 1;
+                const variable: types.Variable = @intCast(-raw_var - 1);
                 try self.literals.append(Lit.init(variable, true));
                 while (self.solver.nVars() <= variable) {
                     _ = try self.solver.newVar();
                 }
             } else {
-                const variable = raw_var - 1;
-                try self.literals.append(Lit.init(variable, true));
+                const variable: types.Variable = @intCast(raw_var - 1);
+                try self.literals.append(Lit.init(variable, false));
                 while (self.solver.nVars() <= variable) {
                     _ = try self.solver.newVar();
                 }

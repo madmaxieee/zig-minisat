@@ -1,7 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
 
-const debug = std.debug;
 const io = std.io;
 const fs = std.fs;
 

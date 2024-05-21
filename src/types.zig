@@ -1,9 +1,9 @@
 const std = @import("std");
 
-pub const Variable = i32;
+pub const Variable = u32;
 
 pub const Literal = struct {
-    x: i32,
+    x: u32,
 
     pub fn init(v: Variable, b: bool) Literal {
         return .{ .x = v + v + @intFromBool(b) };
@@ -24,7 +24,7 @@ pub const Literal = struct {
         return .{ .x = self.x ^ @intFromBool(b) };
     }
     pub inline fn sign(self: Literal) bool {
-        return (self.x & 1) != 0;
+        return self.x % 2 == 1;
     }
     pub inline fn variable(self: Literal) Variable {
         return self.x >> 1;

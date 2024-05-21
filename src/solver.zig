@@ -548,7 +548,7 @@ pub const MiniSAT = struct {
                 try self.cancelUntil(backtrack_level);
 
                 if (learnt_clause.items.len == 1) {
-                    self.uncheckedEnqueue(learnt_clause.items[0], null);
+                    try self.uncheckedEnqueue(learnt_clause.items[0], null);
                 } else {
                     const alloc = self.clauseAllocator.allocator();
                     const c = try alloc.create(Clause);
@@ -556,7 +556,7 @@ pub const MiniSAT = struct {
                     try self.learnts.append(c);
                     try self.attachClause(c);
                     self.claBumpActivity(c);
-                    self.uncheckedEnqueue(learnt_clause.items[0], c);
+                    try self.uncheckedEnqueue(learnt_clause.items[0], c);
                 }
 
                 self.varDecayActivity();
@@ -631,7 +631,7 @@ pub const MiniSAT = struct {
                 }
 
                 try self.newDecisionLevel();
-                self.uncheckedEnqueue(next.?, null);
+                try self.uncheckedEnqueue(next.?, null);
             }
         }
     }
@@ -691,7 +691,7 @@ pub const MiniSAT = struct {
             self.ok = false;
             return false;
         } else if (_ps.*.len == 1) {
-            self.uncheckedEnqueue(_ps.*[0], null);
+            try self.uncheckedEnqueue(_ps.*[0], null);
             self.ok = try self.propagate() == null;
             return self.ok;
         } else {
@@ -890,22 +890,22 @@ pub const MiniSAT = struct {
         try self.seen.put(p.variable(), .undef);
     }
 
-    fn uncheckedEnqueue(self: *MiniSAT, p: Lit, from: ?*Clause) void {
+    fn uncheckedEnqueue(self: *MiniSAT, p: Lit, from: ?*Clause) !void {
         if (self.litValue(p).neq(types.l_Undef)) {
             @panic("literal value must be undefined");
         }
-        self.assigns.put(
+        try self.assigns.put(
             p.variable(),
             Lbool.fromBool(!p.sign()),
-        ) catch unreachable;
-        self.vardata.put(
+        );
+        try self.vardata.put(
             p.variable(),
             VarData{
                 .reason = from,
                 .level = self.decisionLevel(),
             },
-        ) catch unreachable;
-        self.trail.append(p) catch unreachable;
+        );
+        try self.trail.append(p);
     }
 
     fn propagate(self: *MiniSAT) !?*Clause {
@@ -972,7 +972,7 @@ pub const MiniSAT = struct {
                         i += 1;
                     }
                 } else {
-                    self.uncheckedEnqueue(first, c);
+                    try self.uncheckedEnqueue(first, c);
                 }
             }
             ws.shrinkAndFree(ws.items.len - j);
@@ -1220,7 +1220,7 @@ pub const MiniSAT = struct {
         if (p_val != types.l_Undef) {
             return p_val != types.l_False;
         } else {
-            self.uncheckedEnqueue(p, from);
+            try self.uncheckedEnqueue(p, from);
             return true;
         }
     }
