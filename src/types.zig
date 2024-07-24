@@ -24,7 +24,7 @@ pub const Literal = struct {
         return .{ .x = self.x ^ @intFromBool(b) };
     }
     pub inline fn sign(self: Literal) bool {
-        return self.x % 2 == 1;
+        return self.x & 1 == 1;
     }
     pub inline fn variable(self: Literal) Variable {
         return self.x >> 1;
@@ -65,7 +65,7 @@ pub const LiftedBool = struct {
     value: u8,
 
     pub inline fn fromBool(v: bool) LiftedBool {
-        return LiftedBool{ .value = @intFromBool(v) };
+        return LiftedBool{ .value = @intFromBool(!v) };
     }
     pub inline fn eql(self: LiftedBool, b: LiftedBool) bool {
         return ((b.value & 2) & (self.value & 2)) != 0 or ((b.value & 2 == 0) and (self.value == b.value));
@@ -345,10 +345,12 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             try self.dirty.put(key, false);
         }
 
-        pub fn cleanAll(self: *Self) void {
-            for (0..self.dirties.len) |i| {
-                if (self.dirty.get(&self.dirties[i]) != 0) {
-                    self.clean(&self.dirties[i]);
+        pub fn cleanAll(self: *Self) !void {
+            for (0..self.dirties.items.len) |i| {
+                if (self.dirty.get(self.dirties.items[i])) |is_dirty| {
+                    if (is_dirty) {
+                        try self.clean(self.dirties.items[i]);
+                    }
                 }
             }
             self.dirties.clearRetainingCapacity();

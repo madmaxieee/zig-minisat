@@ -453,6 +453,9 @@ pub const MiniSAT = struct {
     }
 
     fn solve(self: *MiniSAT) !SolverResult {
+        if (!try self.simplify()) {
+            return SolverResult.unsat;
+        }
         const result = try self._solve();
         return if (result.eql(types.l_True))
             SolverResult.sat
@@ -472,11 +475,7 @@ pub const MiniSAT = struct {
 
         self.solves += 1;
 
-        self.max_learnts = @max(
-            @as(f64, @floatFromInt(self.num_clauses)) * self.learntsize_factor,
-            @as(f64, @floatFromInt(self.min_learnts_lim)),
-        );
-
+        self.max_learnts = @as(f64, @floatFromInt(self.num_clauses)) * self.learntsize_factor;
         self.learntsize_adjust_confl = self.learntsize_adjust_start_confl;
         self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
         var status: Lbool = types.l_Undef;
@@ -679,7 +678,7 @@ pub const MiniSAT = struct {
         for (_ps.*) |p_i| {
             if (self.litValue(p_i).eql(types.l_True) or (p != null and p_i.eql(p.?.neg()))) {
                 return true;
-            } else if (self.litValue(p_i).neq(types.l_False) and (p != null and p_i.neq(p.?))) {
+            } else if (self.litValue(p_i).neq(types.l_False) and (p == null or p_i.neq(p.?))) {
                 p = p_i;
                 _ps.*[j] = p_i;
                 j += 1;
@@ -911,10 +910,12 @@ pub const MiniSAT = struct {
     fn propagate(self: *MiniSAT) !?*Clause {
         var conflict: ?*Clause = null;
         var num_props: u64 = 0;
+        try self.watches.cleanAll();
 
         while (self.qhead < self.trail.items.len) {
             const p = self.trail.items[self.qhead];
             self.qhead += 1;
+
             const ws = (try self.watches.lookup(p)).?;
             num_props += 1;
 
@@ -1075,7 +1076,7 @@ pub const MiniSAT = struct {
         }
 
         while (next == null or self.varValue(next.?).neq(types.l_Undef) or !self.decision.get(next.?).?) {
-            if (self.order_heap.len == 0) {
+            if (self.order_heap.items.len == 0) {
                 next = null;
                 break;
             } else {
@@ -1345,7 +1346,7 @@ test "MiniSAT.newVar" {
     var solver: Solver = minisat.solver();
     defer solver.deinit();
 
-    var variables = [_]i32{0} ** 5;
+    var variables = [_]Var{0} ** 5;
     for (0..5) |i| {
         variables[i] = try solver.newVar();
     }
@@ -1363,7 +1364,7 @@ test "MiniSAT: sat-trivial-01" {
     var solver: Solver = minisat.solver();
     defer solver.deinit();
     const num_vars = 10;
-    var variables = [_]i32{0} ** num_vars;
+    var variables = [_]Var{0} ** num_vars;
 
     for (0..num_vars) |i| {
         variables[i] = try solver.newVar();
@@ -1374,4 +1375,28 @@ test "MiniSAT: sat-trivial-01" {
     const result = try solver.solve();
 
     try testing.expect(result == .sat);
+}
+
+test "MiniSAT: unsat-trivial-01" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+    const num_vars = 10;
+    var variables = [_]Var{0} ** num_vars;
+
+    for (0..num_vars) |i| {
+        variables[i] = try solver.newVar();
+    }
+    for (variables) |v| {
+        _ = try solver.addClause(&[_]Lit{Lit.init(v, false)});
+    }
+    _ = try solver.addClause(&[_]Lit{Lit.init(variables[0], true)});
+    const result = try solver.solve();
+
+    try testing.expect(result == .unsat);
 }
