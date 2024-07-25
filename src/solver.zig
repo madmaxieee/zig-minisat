@@ -24,6 +24,7 @@ pub const Solver = struct {
         nVarsFn: *const fn (pointer: *anyopaque) usize,
         addClauseFn: *const fn (pointer: *anyopaque, ps: []const Lit) anyerror!bool,
         solveFn: *const fn (pointer: *anyopaque) anyerror!SolverResult,
+        okayFn: *const fn (pointer: *anyopaque) bool,
     };
 
     fn init(
@@ -33,6 +34,7 @@ pub const Solver = struct {
         comptime nVarsFn: *const fn (pointer: @TypeOf(ptr)) usize,
         comptime addClauseFn: *const fn (pointer: @TypeOf(ptr), ps: []const Lit) anyerror!bool,
         comptime solveFn: *const fn (pointer: @TypeOf(ptr)) anyerror!SolverResult,
+        comptime okayFn: *const fn (pointer: @TypeOf(ptr)) bool,
     ) Solver {
         const T = @TypeOf(ptr);
         const vtable = struct {
@@ -56,6 +58,10 @@ pub const Solver = struct {
                 const self: T = @ptrCast(@alignCast(pointer));
                 return solveFn(self);
             }
+            pub fn okay(pointer: *anyopaque) bool {
+                const self: T = @ptrCast(@alignCast(pointer));
+                return okayFn(self);
+            }
         };
         return .{
             .ptr = ptr,
@@ -65,6 +71,7 @@ pub const Solver = struct {
                 .nVarsFn = vtable.nVars,
                 .addClauseFn = vtable.addClause,
                 .solveFn = vtable.solve,
+                .okayFn = vtable.okay,
             },
         };
     }
@@ -87,6 +94,10 @@ pub const Solver = struct {
 
     pub fn solve(self: Solver) anyerror!SolverResult {
         return self.vtable.solveFn(self.ptr);
+    }
+
+    pub fn okay(self: Solver) bool {
+        return self.vtable.okayFn(self.ptr);
     }
 };
 
@@ -341,6 +352,7 @@ pub const MiniSAT = struct {
             &nVars,
             &addClause,
             &solve,
+            &okay,
         );
     }
 
@@ -371,6 +383,10 @@ pub const MiniSAT = struct {
         self.analyze_stack.deinit();
         self.analyze_toclear.deinit();
         self.add_tmp.deinit();
+    }
+
+    fn okay(self: *MiniSAT) bool {
+        return self.ok;
     }
 
     fn newVar(self: *MiniSAT) !Var {
@@ -684,9 +700,9 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        self.add_tmp.shrinkAndFree(self.add_tmp.items.len - j);
+        self.add_tmp.shrinkAndFree(j);
 
-        if (_ps.*.len == 0) {
+        if (_ps.len == 0) {
             self.ok = false;
             return false;
         } else if (_ps.*.len == 1) {
@@ -922,8 +938,9 @@ pub const MiniSAT = struct {
             var i: usize = 0;
             var j: usize = 0;
             next_clause: while (i < ws.items.len) {
-                const blocker = ws.*.items[i].blocker;
+                const blocker = ws.items[i].blocker;
                 if (self.litValue(blocker).eql(types.l_True)) {
+                    ws.items[j] = ws.items[i];
                     i += 1;
                     j += 1;
                     continue;
@@ -944,8 +961,8 @@ pub const MiniSAT = struct {
                 // If 0th watch is true, then clause is already satisfied.
                 const first = c.get(0);
                 const w = Watcher{ .clause = c, .blocker = first };
-                if (!first.eql(blocker) and self.litValue(first).eql(types.l_True)) {
-                    ws.*.items[j] = w;
+                if (first.neq(blocker) and self.litValue(first).eql(types.l_True)) {
+                    ws.items[j] = w;
                     j += 1;
                     continue;
                 }
@@ -968,7 +985,7 @@ pub const MiniSAT = struct {
                     self.qhead = self.trail.items.len;
                     // copy the remaining watches:
                     while (i < ws.items.len) {
-                        ws.*.items[j] = ws.*.items[i];
+                        ws.items[j] = ws.items[i];
                         j += 1;
                         i += 1;
                     }

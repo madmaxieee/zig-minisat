@@ -32,6 +32,19 @@ pub const Literal = struct {
     pub inline fn toInt(self: Literal) i32 {
         return self.x;
     }
+
+    pub fn format(
+        self: Literal,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        const var_: Variable = self.variable();
+        if (self.sign()) {
+            try writer.print("-", .{});
+        }
+        try writer.print("{d}", .{var_ + 1});
+    }
 };
 
 pub fn literalLessThan(context: void, lhs: Literal, rhs: Literal) bool {
