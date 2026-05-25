@@ -451,7 +451,7 @@ pub const MiniSAT = struct {
                     j += 1;
                 }
             }
-            self.trail.shrinkRetainingCapacity(self.trail.items.len - j);
+            self.trail.shrinkRetainingCapacity(j);
             self.qhead = self.trail.items.len;
 
             for (self.released_vars.items) |v| {
@@ -762,17 +762,20 @@ pub const MiniSAT = struct {
             while (self.seen.get(self.trail.items[index].variable()).? == .undef) : (index -= 1) {}
 
             p = self.trail.items[index];
-            conflict = self.reason(p.?.variable()).?;
+            const maybe_reason = self.reason(p.?.variable());
             try self.seen.put(p.?.variable(), .undef);
             pathC -= 1;
 
             if (pathC <= 0) {
                 break;
             }
+
+            conflict = maybe_reason.?;
         }
         out_learnt.items[0] = p.?.neg();
 
-        std.mem.copyBackwards(Lit, self.analyze_toclear.items, out_learnt.items);
+        self.analyze_toclear.clearRetainingCapacity();
+        try self.analyze_toclear.appendSlice(self.allocator, out_learnt.items);
 
         // Simplify conflict clause (start at index 1 to preserve the asserting literal):
         var j: usize = 1;
@@ -810,7 +813,7 @@ pub const MiniSAT = struct {
         }
 
         self.max_literals += out_learnt.items.len;
-        out_learnt.shrinkRetainingCapacity(out_learnt.items.len - j);
+        out_learnt.shrinkRetainingCapacity(j);
         self.tot_literals += out_learnt.items.len;
 
         if (out_learnt.items.len == 1) {
@@ -1008,7 +1011,7 @@ pub const MiniSAT = struct {
                     try self.uncheckedEnqueue(first, c);
                 }
             }
-            ws.shrinkAndFree(self.allocator, ws.items.len - j);
+            ws.shrinkAndFree(self.allocator, j);
         }
         self.propagations += num_props;
         self.simpDB_props -= @intCast(num_props);
@@ -1037,14 +1040,26 @@ pub const MiniSAT = struct {
         }
 
         if (strict) {
+            // C++ Watcher::operator== only compares cref (clause pointer), not blocker.
+            // The blocker can change during propagation, so we must match by clause only.
             const watchers_0 = self.watches.getPtr(c.get(0).neg()).?;
-            const to_remove_0 = Watcher{ .clause = c, .blocker = c.get(1) };
-            const index_to_remove_0 = util.index_of(Watcher, watchers_0.items, to_remove_0).?;
-            _ = watchers_0.orderedRemove(index_to_remove_0);
+            var index_to_remove_0: ?usize = null;
+            for (watchers_0.items, 0..) |w, i| {
+                if (w.clause == c) {
+                    index_to_remove_0 = i;
+                    break;
+                }
+            }
+            _ = watchers_0.orderedRemove(index_to_remove_0.?);
             const watchers_1 = self.watches.getPtr(c.get(1).neg()).?;
-            const to_remove_1 = Watcher{ .clause = c, .blocker = c.get(0) };
-            const index_to_remove_1 = util.index_of(Watcher, watchers_1.items, to_remove_1).?;
-            _ = watchers_1.orderedRemove(index_to_remove_1);
+            var index_to_remove_1: ?usize = null;
+            for (watchers_1.items, 0..) |w, i| {
+                if (w.clause == c) {
+                    index_to_remove_1 = i;
+                    break;
+                }
+            }
+            _ = watchers_1.orderedRemove(index_to_remove_1.?);
         } else {
             try self.watches.smudge(c.get(0).neg());
             try self.watches.smudge(c.get(1).neg());
@@ -1146,7 +1161,7 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        self.learnts.shrinkAndFree(self.allocator, self.learnts.items.len - j);
+        self.learnts.shrinkAndFree(self.allocator, j);
     }
 
     fn removeSatisfied(self: *MiniSAT, clauses: *std.ArrayList(*Clause)) !void {
@@ -1172,7 +1187,7 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        clauses.shrinkAndFree(self.allocator, clauses.items.len - j);
+        clauses.shrinkAndFree(self.allocator, j);
     }
 
     fn rebuildOrderHeap(self: *MiniSAT) !void {

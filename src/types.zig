@@ -354,7 +354,7 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
                     j += 1;
                 }
             }
-            value.shrinkRetainingCapacity(value.items.len - j);
+            value.shrinkRetainingCapacity(j);
             try self.dirty.put(key, false);
         }
 
