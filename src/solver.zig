@@ -1084,6 +1084,9 @@ pub const MiniSAT = struct {
                     break;
                 }
             }
+            self.qhead = self.trail_lim.items[until_level];
+            self.trail.shrinkRetainingCapacity(self.trail_lim.items[until_level]);
+            self.trail_lim.shrinkRetainingCapacity(until_level);
         }
     }
 
