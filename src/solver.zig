@@ -758,7 +758,7 @@ pub const MiniSAT = struct {
 
             while (self.seen.get(self.trail.items[index].variable()).? == .undef) : (index -= 1) {}
 
-            p = self.trail.items[index + 1];
+            p = self.trail.items[index];
             conflict = self.reason(p.?.variable()).?;
             try self.seen.put(p.?.variable(), .undef);
             pathC -= 1;
