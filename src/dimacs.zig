@@ -18,23 +18,20 @@ pub const DimcasParser = struct {
     pub fn init(allocator: std.mem.Allocator, _solver: *Solver) DimcasParser {
         return DimcasParser{
             .allocator = allocator,
-            .literals = std.ArrayList(Lit).init(allocator),
+            .literals = std.ArrayList(Lit){},
             .solver = _solver,
         };
     }
 
-    pub fn deinit(self: DimcasParser) void {
-        self.literals.deinit();
+    pub fn deinit(self: *DimcasParser) void {
+        self.literals.deinit(self.allocator);
     }
 
-    pub fn parse(self: *DimcasParser, reader: std.fs.File.Reader) !void {
-        var buf_reader = std.io.bufferedReader(reader);
-        var in_stream = buf_reader.reader();
-
+    pub fn parse(self: *DimcasParser, reader_param: std.fs.File.Reader) !void {
+        var reader = reader_param;
         var header: ?DimacsHeader = null;
-        var buf: [4096]u8 = undefined;
         var count: usize = 0;
-        while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        while (try reader.interface.takeDelimiter('\n')) |line| {
             const trimmed_line = std.mem.trim(u8, line, "\n");
             if (std.mem.eql(u8, trimmed_line, "%")) {
                 break;
@@ -57,7 +54,7 @@ pub const DimcasParser = struct {
 
     fn parseComment(self: DimcasParser, line: []const u8) !bool {
         _ = self;
-        var it = std.mem.split(u8, line, " ");
+        var it = std.mem.splitSequence(u8, line, " ");
         if (it.next()) |first_tok| {
             if (std.mem.eql(u8, first_tok, "c")) {
                 return true;
@@ -72,7 +69,7 @@ pub const DimcasParser = struct {
             .num_variables = undefined,
             .num_clauses = undefined,
         };
-        var it = std.mem.split(u8, line, " ");
+        var it = std.mem.splitSequence(u8, line, " ");
         var tok: ?[]const u8 = it.next();
         while (tok != null and tok.?.len == 0) : (tok = it.next()) {}
         if (tok) |first_tok| {
@@ -109,7 +106,7 @@ pub const DimcasParser = struct {
 
     fn parseClause(self: *DimcasParser, line: []const u8) !void {
         self.literals.clearRetainingCapacity();
-        var it = std.mem.split(u8, line, " ");
+        var it = std.mem.splitSequence(u8, line, " ");
         while (it.next()) |tok| {
             if (tok.len == 0) {
                 continue;
@@ -119,13 +116,13 @@ pub const DimcasParser = struct {
                 break;
             } else if (raw_var < 0) {
                 const variable: types.Variable = @intCast(-raw_var - 1);
-                try self.literals.append(Lit.init(variable, true));
+                try self.literals.append(self.allocator, Lit.init(variable, true));
                 while (self.solver.nVars() <= variable) {
                     _ = try self.solver.newVar();
                 }
             } else {
                 const variable: types.Variable = @intCast(raw_var - 1);
-                try self.literals.append(Lit.init(variable, false));
+                try self.literals.append(self.allocator, Lit.init(variable, false));
                 while (self.solver.nVars() <= variable) {
                     _ = try self.solver.newVar();
                 }

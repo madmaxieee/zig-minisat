@@ -211,6 +211,7 @@ pub const MiniSAT = struct {
     propagation_budget: ?u64,
     asynch_interrupt: bool,
 
+    prng: std.Random.DefaultPrng,
     rand: std.Random,
 
     const LiteralSet = std.ArrayHashMap(Lit, void, types.LiteralHashContext, false);
@@ -248,17 +249,14 @@ pub const MiniSAT = struct {
     pub fn create(allocator: std.mem.Allocator) !*MiniSAT {
         var self = try allocator.create(MiniSAT);
 
-        var prng = std.rand.DefaultPrng.init(blk: {
-            var seed: u64 = undefined;
-            std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
-            break :blk seed;
-        });
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
 
         self.* = MiniSAT{
             .allocator = allocator,
             .clauseAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 
-            .model = std.ArrayList(Lbool).init(allocator),
+            .model = std.ArrayList(Lbool){},
             .conflict = LiteralSet.init(allocator),
 
             .verbose = true,
@@ -296,11 +294,11 @@ pub const MiniSAT = struct {
             .max_literals = 0,
             .tot_literals = 0,
 
-            .clauses = std.ArrayList(*Clause).init(allocator),
-            .learnts = std.ArrayList(*Clause).init(allocator),
-            .trail = std.ArrayList(Lit).init(allocator),
-            .trail_lim = std.ArrayList(usize).init(allocator),
-            .assumptions = std.ArrayList(Lit).init(allocator),
+            .clauses = std.ArrayList(*Clause){},
+            .learnts = std.ArrayList(*Clause){},
+            .trail = std.ArrayList(Lit){},
+            .trail_lim = std.ArrayList(usize){},
+            .assumptions = std.ArrayList(Lit){},
 
             .activity = VariableMap(f64).init(allocator),
             .assigns = VariableMap(Lbool).init(allocator),
@@ -322,13 +320,13 @@ pub const MiniSAT = struct {
 
             .next_var = 0,
 
-            .released_vars = std.ArrayList(Var).init(allocator),
-            .free_vars = std.ArrayList(Var).init(allocator),
+            .released_vars = std.ArrayList(Var){},
+            .free_vars = std.ArrayList(Var){},
 
             .seen = VariableMap(Seen).init(allocator),
-            .analyze_stack = std.ArrayList(AnalyzeStackElement).init(allocator),
-            .analyze_toclear = std.ArrayList(Lit).init(allocator),
-            .add_tmp = std.ArrayList(Lit).init(allocator),
+            .analyze_stack = std.ArrayList(AnalyzeStackElement){},
+            .analyze_toclear = std.ArrayList(Lit){},
+            .add_tmp = std.ArrayList(Lit){},
 
             .max_learnts = 0,
             .learntsize_adjust_confl = 0,
@@ -338,8 +336,12 @@ pub const MiniSAT = struct {
             .propagation_budget = null,
             .asynch_interrupt = false,
 
-            .rand = prng.random(),
+            .prng = undefined,
+            .rand = undefined,
         };
+
+        self.prng = std.Random.DefaultPrng.init(seed);
+        self.rand = self.prng.random();
 
         return self;
     }
@@ -359,14 +361,14 @@ pub const MiniSAT = struct {
     pub fn deinit(self: *MiniSAT) void {
         self.clauseAllocator.deinit();
 
-        self.model.deinit();
+        self.model.deinit(self.allocator);
         self.conflict.deinit();
 
-        self.clauses.deinit();
-        self.learnts.deinit();
-        self.trail.deinit();
-        self.trail_lim.deinit();
-        self.assumptions.deinit();
+        self.clauses.deinit(self.allocator);
+        self.learnts.deinit(self.allocator);
+        self.trail.deinit(self.allocator);
+        self.trail_lim.deinit(self.allocator);
+        self.assumptions.deinit(self.allocator);
 
         self.activity.deinit();
         self.assigns.deinit();
@@ -377,12 +379,12 @@ pub const MiniSAT = struct {
         self.watches.deinit();
         self.order_heap.deinit();
 
-        self.released_vars.deinit();
-        self.free_vars.deinit();
+        self.released_vars.deinit(self.allocator);
+        self.free_vars.deinit(self.allocator);
         self.seen.deinit();
-        self.analyze_stack.deinit();
-        self.analyze_toclear.deinit();
-        self.add_tmp.deinit();
+        self.analyze_stack.deinit(self.allocator);
+        self.analyze_toclear.deinit(self.allocator);
+        self.add_tmp.deinit(self.allocator);
     }
 
     fn okay(self: *MiniSAT) bool {
@@ -396,7 +398,7 @@ pub const MiniSAT = struct {
     fn _newVar(self: *MiniSAT, upol: Lbool, dvar: bool) !Var {
         var v: Var = undefined;
         if (self.free_vars.items.len > 0) {
-            v = self.free_vars.pop();
+            v = self.free_vars.pop().?;
         } else {
             v = self.next_var;
             self.next_var += 1;
@@ -411,7 +413,7 @@ pub const MiniSAT = struct {
         self.polarity.put(v, true) catch unreachable;
         self.user_pol.put(v, upol) catch unreachable;
         self.decision.ensureTotalCapacity(@intCast(v)) catch unreachable;
-        self.trail.ensureTotalCapacity(@intCast(v)) catch unreachable;
+        self.trail.ensureTotalCapacity(self.allocator, @intCast(v)) catch unreachable;
 
         self.setDecisionVar(v, dvar);
         return v;
@@ -456,7 +458,7 @@ pub const MiniSAT = struct {
                 try self.seen.put(v, .undef);
             }
 
-            try self.free_vars.appendSlice(self.released_vars.items);
+            try self.free_vars.appendSlice(self.allocator, self.released_vars.items);
             self.released_vars.clearRetainingCapacity();
         }
 
@@ -482,7 +484,7 @@ pub const MiniSAT = struct {
     }
 
     fn _solve(self: *MiniSAT) !Lbool {
-        self.model.clearAndFree();
+        self.model.clearAndFree(self.allocator);
         self.conflict.clearAndFree();
 
         if (!self.ok) {
@@ -497,14 +499,16 @@ pub const MiniSAT = struct {
         var status: Lbool = types.l_Undef;
 
         if (self.verbose) {
-            const stderr = std.io.getStdErr().writer();
-            try stderr.writeAll(
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+            try stderr_writer.interface.writeAll(
                 \\============================[ Search Statistics ]==============================
                 \\| Conflicts |          ORIGINAL         |          LEARNT          | Progress |
                 \\|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |
                 \\===============================================================================
                 \\
             );
+            try stderr_writer.interface.flush();
         }
 
         var curr_restarts: usize = 0;
@@ -521,12 +525,14 @@ pub const MiniSAT = struct {
         }
 
         if (self.verbose) {
-            const stderr = std.io.getStdErr().writer();
-            try stderr.writeAll("===============================================================================\n");
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+            try stderr_writer.interface.writeAll("===============================================================================\n");
+            try stderr_writer.interface.flush();
         }
 
         if (status.eql(types.l_True)) {
-            try self.model.resize(self._nVars());
+            try self.model.resize(self.allocator, self._nVars());
             for (0..self._nVars()) |i| {
                 self.model.items[i] = self.varValue(@intCast(i));
             }
@@ -545,8 +551,8 @@ pub const MiniSAT = struct {
 
         var backtrack_level: usize = undefined;
         var conflictC: u64 = 0;
-        var learnt_clause = std.ArrayList(Lit).init(self.allocator);
-        defer learnt_clause.deinit();
+        var learnt_clause = std.ArrayList(Lit){};
+        defer learnt_clause.deinit(self.allocator);
         self.starts += 1;
 
         while (true) {
@@ -568,7 +574,7 @@ pub const MiniSAT = struct {
                     const alloc = self.clauseAllocator.allocator();
                     const c = try alloc.create(Clause);
                     c.* = try Clause.init(alloc, learnt_clause.items, true, false);
-                    try self.learnts.append(c);
+                    try self.learnts.append(self.allocator, c);
                     try self.attachClause(c);
                     self.claBumpActivity(c);
                     try self.uncheckedEnqueue(learnt_clause.items[0], c);
@@ -582,8 +588,9 @@ pub const MiniSAT = struct {
                     self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
                     self.max_learnts *= self.learntsize_inc;
                     if (self.verbose) {
-                        const stderr = std.io.getStdErr().writer();
-                        try stderr.print(
+                        var stderr_buf: [4096]u8 = undefined;
+                        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+                        try stderr_writer.interface.print(
                             \\| {:9} | {:7} {:8} {:8} | {:8} {:8} {:6.0} | {:6.3} % |
                             \\
                         , .{
@@ -603,6 +610,7 @@ pub const MiniSAT = struct {
 
                             self.progressEstimate() * 100,
                         });
+                        try stderr_writer.interface.flush();
                     }
                 } else {
                     self.learntsize_adjust_cnt -= 1;
@@ -665,7 +673,7 @@ pub const MiniSAT = struct {
     fn releaseVar(self: *MiniSAT, l: Lit) void {
         if (self.litValue(l).eql(types.l_Undef)) {
             addClause(.{l});
-            self.released_vars.append(l.variable());
+            self.released_vars.append(self.allocator, l.variable()) catch unreachable;
         }
     }
 
@@ -678,7 +686,7 @@ pub const MiniSAT = struct {
             return false;
         }
 
-        try self.add_tmp.resize(ps.len);
+        try self.add_tmp.resize(self.allocator, ps.len);
         std.mem.copyForwards(Lit, self.add_tmp.items, ps);
         self.add_tmp.shrinkRetainingCapacity(ps.len);
         std.mem.sort(
@@ -700,7 +708,7 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        self.add_tmp.shrinkAndFree(j);
+        self.add_tmp.shrinkAndFree(self.allocator, j);
 
         if (_ps.len == 0) {
             self.ok = false;
@@ -713,7 +721,7 @@ pub const MiniSAT = struct {
             const alloc = self.clauseAllocator.allocator();
             const c = try alloc.create(Clause);
             c.* = try Clause.init(self.clauseAllocator.allocator(), _ps.*, false, false);
-            try self.clauses.append(c);
+            try self.clauses.append(self.allocator, c);
             try self.attachClause(c);
         }
 
@@ -739,7 +747,7 @@ pub const MiniSAT = struct {
                     if (self.level(q.variable()) >= self.decisionLevel()) {
                         pathC += 1;
                     } else {
-                        try out_learnt.append(q);
+                        try out_learnt.append(self.allocator, q);
                     }
                 }
             }
@@ -827,7 +835,7 @@ pub const MiniSAT = struct {
             @panic("reason must not be null");
         }
 
-        self.analyze_stack.clearAndFree();
+        self.analyze_stack.clearAndFree(self.allocator);
         var c: *Clause = self.reason(p.variable()).?;
 
         var i: usize = 1;
@@ -838,23 +846,23 @@ pub const MiniSAT = struct {
                     continue;
                 }
                 if (self.reason(l.variable()) == null or self.seen.get(l.variable()).? == .failed) {
-                    try self.analyze_stack.append(AnalyzeStackElement{ .i = 0, .lit = p });
+                    try self.analyze_stack.append(self.allocator, AnalyzeStackElement{ .i = 0, .lit = p });
                     for (self.analyze_stack.items) |e| {
                         if (self.seen.get(e.lit.variable()).? == .undef) {
                             try self.seen.put(e.lit.variable(), .failed);
-                            try self.analyze_toclear.append(e.lit);
+                            try self.analyze_toclear.append(self.allocator, e.lit);
                         }
                     }
                     return false;
                 }
-                try self.analyze_stack.append(AnalyzeStackElement{ .i = i, .lit = p });
+                try self.analyze_stack.append(self.allocator, AnalyzeStackElement{ .i = i, .lit = p });
                 i = 0;
                 p = l;
                 c = self.reason(l.variable()).?;
             } else {
                 if (self.seen.get(p.variable()).? == .undef) {
                     try self.seen.put(p.variable(), .removable);
-                    try self.analyze_toclear.append(p);
+                    try self.analyze_toclear.append(self.allocator, p);
                 }
                 if (self.analyze_stack.items.len == 0) {
                     break;
@@ -920,7 +928,7 @@ pub const MiniSAT = struct {
                 .level = self.decisionLevel(),
             },
         );
-        try self.trail.append(p);
+        try self.trail.append(self.allocator, p);
     }
 
     fn propagate(self: *MiniSAT) !?*Clause {
@@ -972,7 +980,7 @@ pub const MiniSAT = struct {
                     if (self.litValue(c.get(k)).neq(types.l_False)) {
                         c.put(1, c.get(k));
                         c.put(k, false_lit);
-                        self.watches.getPtr(c.get(1).neg()).?.append(w) catch unreachable;
+                        self.watches.getPtr(c.get(1).neg()).?.append(self.allocator, w) catch unreachable;
                         continue :next_clause;
                     }
                 }
@@ -993,7 +1001,7 @@ pub const MiniSAT = struct {
                     try self.uncheckedEnqueue(first, c);
                 }
             }
-            ws.shrinkAndFree(ws.items.len - j);
+            ws.shrinkAndFree(self.allocator, ws.items.len - j);
         }
         self.propagations += num_props;
         self.simpDB_props -= @intCast(num_props);
@@ -1005,8 +1013,8 @@ pub const MiniSAT = struct {
         if (c.header.size <= 1) {
             @panic("attachClause: clause size must be > 1");
         }
-        try self.watches.getPtr(c.get(0).neg()).?.append(Watcher{ .clause = c, .blocker = c.get(1) });
-        try self.watches.getPtr(c.get(1).neg()).?.append(Watcher{ .clause = c, .blocker = c.get(0) });
+        try self.watches.getPtr(c.get(0).neg()).?.append(self.allocator, Watcher{ .clause = c, .blocker = c.get(1) });
+        try self.watches.getPtr(c.get(1).neg()).?.append(self.allocator, Watcher{ .clause = c, .blocker = c.get(0) });
         if (c.header.learnt) {
             self.num_learnts += 1;
             self.learnt_literals += c.header.size;
@@ -1128,7 +1136,7 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        self.learnts.shrinkAndFree(self.learnts.items.len - j);
+        self.learnts.shrinkAndFree(self.allocator, self.learnts.items.len - j);
     }
 
     fn removeSatisfied(self: *MiniSAT, clauses: *std.ArrayList(*Clause)) !void {
@@ -1154,16 +1162,16 @@ pub const MiniSAT = struct {
                 j += 1;
             }
         }
-        clauses.shrinkAndFree(clauses.items.len - j);
+        clauses.shrinkAndFree(self.allocator, clauses.items.len - j);
     }
 
     fn rebuildOrderHeap(self: *MiniSAT) !void {
-        var heap_vars = std.ArrayList(Var).init(self.allocator);
+        var heap_vars = std.ArrayList(Var){};
         {
             var v: Var = 0;
             while (v < self._nVars()) : (v += 1) {
                 if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
-                    try heap_vars.append(v);
+                    try heap_vars.append(self.allocator, v);
                 }
             }
         }
@@ -1250,7 +1258,7 @@ pub const MiniSAT = struct {
     }
 
     inline fn newDecisionLevel(self: *MiniSAT) !void {
-        try self.trail_lim.append(self.trail.items.len);
+        try self.trail_lim.append(self.allocator, self.trail.items.len);
     }
 
     inline fn decisionLevel(self: MiniSAT) usize {

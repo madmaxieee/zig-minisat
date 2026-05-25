@@ -160,7 +160,7 @@ pub const Clause = struct {
         var abs: u32 = 0;
         for (0..self.header.size) |i| {
             const bits: u32 = @intCast(self.data[i].lit.variable() & 31);
-            abs |= @as(u32, 1) << @truncate(bits);
+            abs |= @as(u32, 1) << @intCast(bits);
         }
         self.data[self.header.size] = .{ .abs = abs };
     }
@@ -310,17 +310,17 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
                 .allocator = allocator,
                 .occs = OccrMap.init(allocator),
                 .dirty = DirtyMap.init(allocator),
-                .dirties = std.ArrayList(K).init(allocator),
+                .dirties = std.ArrayList(K){},
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.dirty.deinit();
-            self.dirties.deinit();
+            self.dirties.deinit(self.allocator);
 
             var it = self.occs.iterator();
             while (it.next()) |entry| {
-                entry.value_ptr.deinit();
+                entry.value_ptr.deinit(self.allocator);
             }
             self.occs.deinit();
         }
@@ -338,9 +338,9 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
 
         pub fn initKey(self: *Self, key: K) !void {
             if (self.occs.getPtr(key)) |v| {
-                v.clearAndFree();
+                v.clearAndFree(self.allocator);
             } else {
-                try self.occs.put(key, V.init(self.allocator));
+                try self.occs.put(key, V{});
             }
             try self.dirty.put(key, false);
         }
@@ -372,14 +372,14 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
         pub fn smudge(self: *Self, key: K) !void {
             if (self.dirty.get(key) == false) {
                 try self.dirty.put(key, true);
-                try self.dirties.append(key);
+                try self.dirties.append(self.allocator, key);
             }
         }
 
         pub fn clear(self: Self) void {
             self.occs.clearAndFree();
             self.dirty.clearAndFree();
-            self.dirties.clearAndFree();
+            self.dirties.clearAndFree(self.allocator);
         }
     };
 }
