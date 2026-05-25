@@ -738,7 +738,7 @@ pub const MiniSAT = struct {
         // Matches the C++ pattern: out_learnt.push(); ... out_learnt[0] = ~p;
         try out_learnt.append(self.allocator, Lit{ .x = 0 });
 
-        while (true) : (pathC -= 1) {
+        while (true) {
             if (conflict.header.learnt) {
                 self.claBumpActivity(conflict);
             }
