@@ -734,6 +734,10 @@ pub const MiniSAT = struct {
         var index: usize = self.trail.items.len - 1;
         var conflict: *Clause = _conflict;
 
+        // Reserve slot 0 for the asserting literal (written after the loop).
+        // Matches the C++ pattern: out_learnt.push(); ... out_learnt[0] = ~p;
+        try out_learnt.append(self.allocator, Lit{ .x = 0 });
+
         while (true) : (pathC -= 1) {
             if (conflict.header.learnt) {
                 self.claBumpActivity(conflict);
@@ -767,11 +771,11 @@ pub const MiniSAT = struct {
 
         std.mem.copyBackwards(Lit, self.analyze_toclear.items, out_learnt.items);
 
-        // Simplify conflict clause:
-        var j: usize = 0;
+        // Simplify conflict clause (start at index 1 to preserve the asserting literal):
+        var j: usize = 1;
         switch (self.ccmin_mode) {
             .deep => {
-                for (out_learnt.items) |l| {
+                for (out_learnt.items[1..]) |l| {
                     if (self.reason(l.variable()) == null or !(try self.litRedundant(l))) {
                         out_learnt.items[j] = l;
                         j += 1;
@@ -779,7 +783,7 @@ pub const MiniSAT = struct {
                 }
             },
             .basic => {
-                for (out_learnt.items) |l| {
+                for (out_learnt.items[1..]) |l| {
                     const v_learnt = l.variable();
                     if (self.reason(v_learnt) == null) {
                         out_learnt.items[j] = l;
