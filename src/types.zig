@@ -89,12 +89,12 @@ pub const LiftedBool = struct {
     pub inline fn xor(self: LiftedBool, b: bool) LiftedBool {
         return LiftedBool{ .value = self.value ^ @intFromBool(b) };
     }
-    pub inline fn @"and"(self: LiftedBool, b: LiftedBool) bool {
+    pub inline fn @"and"(self: LiftedBool, b: LiftedBool) LiftedBool {
         const sel: u8 = (self.value << 1) | (b.value << 3);
         const v: u8 = (0xF7F755F4 >> sel) & 3;
         return LiftedBool{ .value = v };
     }
-    pub inline fn @"or"(self: LiftedBool, b: LiftedBool) bool {
+    pub inline fn @"or"(self: LiftedBool, b: LiftedBool) LiftedBool {
         const sel: u8 = (self.value << 1) | (b.value << 3);
         const v: u8 = (0xFCFCF400 >> sel) & 3;
         return LiftedBool{ .value = v };
@@ -350,7 +350,7 @@ pub fn OccList(comptime K: type, comptime V: type, comptime KHashContext: ?type)
             var j: usize = 0;
             for (0..value.items.len) |i| {
                 if (!value.items[i].is_deleted()) {
-                    self.dirties.items[j] = self.dirties.items[i];
+                    value.items[j] = value.items[i];
                     j += 1;
                 }
             }

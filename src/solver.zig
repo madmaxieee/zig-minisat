@@ -415,7 +415,7 @@ pub const MiniSAT = struct {
         self.decision.ensureTotalCapacity(@intCast(v)) catch unreachable;
         self.trail.ensureTotalCapacity(self.allocator, @intCast(v)) catch unreachable;
 
-        self.setDecisionVar(v, dvar);
+        try self.setDecisionVar(v, dvar);
         return v;
     }
 
@@ -446,7 +446,7 @@ pub const MiniSAT = struct {
 
             var j: usize = 0;
             for (self.trail.items) |lit| {
-                if (self.seen.get(lit.variable()).? != .undef) {
+                if (self.seen.get(lit.variable()).? == .undef) {
                     self.trail.items[j] = lit;
                     j += 1;
                 }
@@ -494,6 +494,9 @@ pub const MiniSAT = struct {
         self.solves += 1;
 
         self.max_learnts = @as(f64, @floatFromInt(self.num_clauses)) * self.learntsize_factor;
+        if (self.max_learnts < @as(f64, @floatFromInt(self.min_learnts_lim))) {
+            self.max_learnts = @as(f64, @floatFromInt(self.min_learnts_lim));
+        }
         self.learntsize_adjust_confl = self.learntsize_adjust_start_confl;
         self.learntsize_adjust_cnt = @intFromFloat(self.learntsize_adjust_confl);
         var status: Lbool = types.l_Undef;
@@ -573,7 +576,7 @@ pub const MiniSAT = struct {
                 } else {
                     const alloc = self.clauseAllocator.allocator();
                     const c = try alloc.create(Clause);
-                    c.* = try Clause.init(alloc, learnt_clause.items, true, false);
+                    c.* = try Clause.init(alloc, learnt_clause.items, true, true);
                     try self.learnts.append(self.allocator, c);
                     try self.attachClause(c);
                     self.claBumpActivity(c);
@@ -897,7 +900,7 @@ pub const MiniSAT = struct {
             const i_rev = self.trail.items.len - 1 + self.trail_lim.items[0] - i;
             const x = self.trail.items[i_rev].variable();
             if (self.seen.get(x).? != .undef) {
-                if (self.reason(x) != null) {
+                if (self.reason(x) == null) {
                     if (self.level(x) <= 0) {
                         @panic("level must be > 0");
                     }
@@ -1080,7 +1083,7 @@ pub const MiniSAT = struct {
             while (c >= self.trail_lim.items[until_level]) : (c -= 1) {
                 const x = self.trail.items[c].variable();
                 try self.assigns.put(x, types.l_Undef);
-                if (self.phase_saving == .limited or (self.phase_saving == .limited and c > self.trail_lim.items[self.trail_lim.items.len - 1])) {
+                if (self.phase_saving == .full or (self.phase_saving == .limited and c > self.trail_lim.items[self.trail_lim.items.len - 1])) {
                     try self.polarity.put(x, self.trail.items[c].sign());
                 }
                 try self.insertVarOrder(x);
@@ -1131,7 +1134,7 @@ pub const MiniSAT = struct {
     }
 
     fn reduceDB(self: *MiniSAT) !void {
-        const extra_lim: f64 = self.cla_inc - @as(f64, @floatFromInt(self.learnts.items.len));
+        const extra_lim: f64 = self.cla_inc / @as(f64, @floatFromInt(self.learnts.items.len));
         std.mem.sort(*Clause, self.learnts.items, {}, Clause.activityLessThan);
 
         var j: usize = 0;
@@ -1223,7 +1226,8 @@ pub const MiniSAT = struct {
         act.* += self.var_inc;
         if (act.* > 1e100) {
             for (0..self._nVars()) |i| {
-                try self.activity.put(@intCast(i), act.* * 1e-100);
+                const vi: Var = @intCast(i);
+                try self.activity.put(vi, self.activity.getPtr(vi).?.* * 1e-100);
             }
             self.var_inc *= 1e-100;
         }
@@ -1315,13 +1319,14 @@ pub const MiniSAT = struct {
         self.user_pol.put(v, b) catch unreachable;
     }
 
-    inline fn setDecisionVar(self: *MiniSAT, v: Var, b: bool) void {
+    inline fn setDecisionVar(self: *MiniSAT, v: Var, b: bool) !void {
         if (b and !(self.decision.get(v) orelse false)) {
             self.dec_vars += 1;
         } else if (!b and (self.decision.get(v) orelse false)) {
             self.dec_vars -= 1;
         }
-        self.decision.put(v, b) catch unreachable;
+        try self.decision.put(v, b);
+        try self.insertVarOrder(v);
     }
 
     inline fn setConfBudget(self: *MiniSAT, x: i64) void {
