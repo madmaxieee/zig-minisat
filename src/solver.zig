@@ -1191,22 +1191,15 @@ pub const MiniSAT = struct {
     }
 
     fn rebuildOrderHeap(self: *MiniSAT) !void {
-        var heap_vars = std.ArrayList(Var){};
-        {
-            var v: Var = 0;
-            while (v < self._nVars()) : (v += 1) {
-                if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
-                    try heap_vars.append(self.allocator, v);
-                }
+        // Match C++ Heap::build: clear existing heap and re-add items.
+        self.order_heap.deinit();
+        self.order_heap = VarOrderHeap.init(self.allocator, VarOrderHeapContext{ .activity = &self.activity });
+        var v: Var = 0;
+        while (v < self._nVars()) : (v += 1) {
+            if (self.decision.get(v) != null and self.varValue(v).eql(types.l_Undef)) {
+                try self.order_heap.add(v);
             }
         }
-
-        self.order_heap.deinit();
-        self.order_heap = VarOrderHeap.fromOwnedSlice(
-            self.allocator,
-            heap_vars.items,
-            VarOrderHeapContext{ .activity = &self.activity },
-        );
     }
 
     inline fn reason(self: MiniSAT, x: Var) ?*Clause {
