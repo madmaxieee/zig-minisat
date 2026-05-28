@@ -1,3 +1,3 @@
 # zig-minisat
 
-A WIP minisat implementation in Zig.
+A reasonably fast, usable minisat implementation in Zig.
