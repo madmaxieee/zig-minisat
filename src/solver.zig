@@ -1445,3 +1445,212 @@ test "MiniSAT: unsat-trivial-01" {
 
     try testing.expect(result == .unsat);
 }
+
+// --- Non-trivial embedded test cases ---
+//
+// Each test encodes a small but meaningful SAT/UNSAT problem directly in
+// code, exercising conflict-driven clause learning, unit propagation,
+// backtracking, and restarts.
+
+// Pigeonhole: 3 pigeons into 2 holes — classic small UNSAT instance.
+// Variables: p_i_j = "pigeon i is in hole j"
+//   i in {0,1,2}, j in {0,1}
+// Clauses:
+//   (p_i_0 OR p_i_1)           — each pigeon must go somewhere
+//   (NOT p_i_j OR NOT p_k_j)   — no two pigeons share a hole
+test "MiniSAT: pigeonhole-3-2 unsat" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    // 6 variables: p_i_j indexed as i*2 + j
+    var vars = [_]Var{0} ** 6;
+    for (0..6) |i| {
+        vars[i] = try solver.newVar();
+    }
+
+    // Each pigeon must be placed: (p_i_0 OR p_i_1)
+    for (0..3) |i| {
+        _ = try solver.addClause(&[_]Lit{
+            Lit.init(vars[i * 2], false),
+            Lit.init(vars[i * 2 + 1], false),
+        });
+    }
+
+    // No two pigeons in the same hole: (NOT p_i_j OR NOT p_k_j)
+    for (0..2) |j| {
+        for (0..3) |i| {
+            for ((i + 1)..3) |k| {
+                _ = try solver.addClause(&[_]Lit{
+                    Lit.init(vars[i * 2 + j], true),
+                    Lit.init(vars[k * 2 + j], true),
+                });
+            }
+        }
+    }
+
+    const result = try solver.solve();
+    try testing.expect(result == .unsat);
+}
+
+// Simple 3-SAT with a unique satisfying assignment:
+//   (x0 OR x1 OR x2)
+//   (x0 OR NOT x1 OR x2)
+//   (NOT x0 OR x1 OR x2)
+//   (NOT x0 OR NOT x1 OR NOT x2)
+// Satisfiable: e.g. x0=1, x1=1, x2=0
+test "MiniSAT: 3sat-unique sat" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    var x = [_]Var{0} ** 3;
+    for (0..3) |i| {
+        x[i] = try solver.newVar();
+    }
+
+    // (x0 OR x1 OR x2)
+    _ = try solver.addClause(&[_]Lit{
+        Lit.init(x[0], false),
+        Lit.init(x[1], false),
+        Lit.init(x[2], false),
+    });
+    // (x0 OR NOT x1 OR x2)
+    _ = try solver.addClause(&[_]Lit{
+        Lit.init(x[0], false),
+        Lit.init(x[1], true),
+        Lit.init(x[2], false),
+    });
+    // (NOT x0 OR x1 OR x2)
+    _ = try solver.addClause(&[_]Lit{
+        Lit.init(x[0], true),
+        Lit.init(x[1], false),
+        Lit.init(x[2], false),
+    });
+    // (NOT x0 OR NOT x1 OR NOT x2)
+    _ = try solver.addClause(&[_]Lit{
+        Lit.init(x[0], true),
+        Lit.init(x[1], true),
+        Lit.init(x[2], true),
+    });
+
+    const result = try solver.solve();
+    try testing.expect(result == .sat);
+}
+
+// UNSAT via unit propagation forcing a conflict:
+//   (x0), (NOT x0 OR x1), (NOT x0 OR NOT x1)
+// Unit propagation: x0=T → x1=T (from clause 2) and x1=F (from clause 3) → conflict
+test "MiniSAT: unit-prop-conflict unsat" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    const x0 = try solver.newVar();
+    const x1 = try solver.newVar();
+
+    // (x0)
+    _ = try solver.addClause(&[_]Lit{Lit.init(x0, false)});
+    // (NOT x0 OR x1)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, true), Lit.init(x1, false) });
+    // (NOT x0 OR NOT x1)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, true), Lit.init(x1, true) });
+
+    const result = try solver.solve();
+    try testing.expect(result == .unsat);
+}
+
+// 4-variable problem requiring backtracking:
+//   (x0 OR x1), (NOT x0 OR x2), (NOT x1 OR x3),
+//   (NOT x2), (NOT x3)
+// SAT: x0=F, x1=T → x3=F conflicts with (NOT x1 OR x3)
+//      x0=T → x2=T conflicts with (NOT x2)
+//      x0=F, x1=F satisfies (x0 OR x1)? No.
+// Actually UNSAT: all paths lead to conflict.
+test "MiniSAT: backtrack-4var unsat" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    const x0 = try solver.newVar();
+    const x1 = try solver.newVar();
+    const x2 = try solver.newVar();
+    const x3 = try solver.newVar();
+
+    // (x0 OR x1)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, false), Lit.init(x1, false) });
+    // (NOT x0 OR x2)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, true), Lit.init(x2, false) });
+    // (NOT x1 OR x3)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x1, true), Lit.init(x3, false) });
+    // (NOT x2)
+    _ = try solver.addClause(&[_]Lit{Lit.init(x2, true)});
+    // (NOT x3)
+    _ = try solver.addClause(&[_]Lit{Lit.init(x3, true)});
+
+    const result = try solver.solve();
+    try testing.expect(result == .unsat);
+}
+
+// 5-variable SAT requiring clause learning:
+//   (x0 OR x1 OR x2)
+//   (NOT x0 OR x3)
+//   (NOT x1 OR x4)
+//   (NOT x3 OR NOT x4 OR x2)
+//   (NOT x2)
+// SAT: x0=F, x1=F → x2 must be T from clause 4, but NOT x2 blocks it.
+//      x0=T → x3=T; x1=F → x4 can be F → clause 4: (NOT x3 OR NOT x4 OR x2)
+//      = (F OR T OR x2) → need x2=T, but NOT x2. Try x1=T → x4=T.
+//      x0=T,x3=T,x1=T,x4=T → clause 4: (F OR F OR x2) → x2=T, but NOT x2.
+//      x0=F,x1=T → x4=T; clause 4: (NOT x3 OR NOT x4 OR x2) = (T OR F OR x2) → ok.
+//      x2=F from clause 5. x0=F,x1=T,x4=T → SAT.
+test "MiniSAT: clause-learning-5var sat" {
+    const testing = std.testing;
+    const test_allocator = testing.allocator;
+
+    var minisat = try MiniSAT.create(test_allocator);
+    defer test_allocator.destroy(minisat);
+    minisat.verbose = false;
+    var solver: Solver = minisat.solver();
+    defer solver.deinit();
+
+    const x0 = try solver.newVar();
+    const x1 = try solver.newVar();
+    const x2 = try solver.newVar();
+    const x3 = try solver.newVar();
+    const x4 = try solver.newVar();
+
+    // (x0 OR x1 OR x2)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, false), Lit.init(x1, false), Lit.init(x2, false) });
+    // (NOT x0 OR x3)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x0, true), Lit.init(x3, false) });
+    // (NOT x1 OR x4)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x1, true), Lit.init(x4, false) });
+    // (NOT x3 OR NOT x4 OR x2)
+    _ = try solver.addClause(&[_]Lit{ Lit.init(x3, true), Lit.init(x4, true), Lit.init(x2, false) });
+    // (NOT x2)
+    _ = try solver.addClause(&[_]Lit{Lit.init(x2, true)});
+
+    const result = try solver.solve();
+    try testing.expect(result == .sat);
+}
